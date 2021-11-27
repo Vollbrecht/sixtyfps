@@ -13,6 +13,7 @@ name = "printerdemo"
 
 [dependencies]
 sixtyfps = { path = "../../../api/sixtyfps-rs" }
+sixtyfps-corelib = { path = "../../../sixtyfps_runtime/corelib", default-features = false, features = ["libm"] }
 sixtyfps-rendering-backend-mcu = { path = "../../../sixtyfps_runtime/rendering_backends/mcu", optional = true  }
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"]}
 
