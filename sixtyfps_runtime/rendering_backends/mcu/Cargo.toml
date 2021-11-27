@@ -13,7 +13,7 @@ path = "lib.rs"
 
 [features]
 simulator = ["winit", "glutin", "femtovg", "embedded-graphics-simulator", "sixtyfps-corelib/std", "imgref", "scoped-tls-hkt"]
-default = ["simulator"]
+# default = ["simulator"]
 unsafe_single_core = ["sixtyfps-corelib/unsafe_single_core"]
 
 [dependencies]
