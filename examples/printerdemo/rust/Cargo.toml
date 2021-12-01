@@ -17,6 +17,9 @@ sixtyfps-corelib = { path = "../../../sixtyfps_runtime/corelib", default-feature
 sixtyfps-rendering-backend-mcu = { path = "../../../sixtyfps_runtime/rendering_backends/mcu", optional = true  }
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"], optional = true}
 
+once_cell = { version="1.8", features = ["atomic-polyfill"], default-features = false }
+
+
 [build-dependencies]
 sixtyfps-build = { path = "../../../api/sixtyfps-rs/sixtyfps-build" }
 

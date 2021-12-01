@@ -79,3 +79,6 @@ panic = "abort"
 
 [profile.dev]
 panic = "abort"
+
+[patch.crates-io]
+once_cell = { git = "https://github.com/sixtyfpsui/once_cell", branch = "atomic-polyfill" }
