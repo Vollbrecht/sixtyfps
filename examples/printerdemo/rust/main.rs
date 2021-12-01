@@ -12,6 +12,8 @@ LICENSE END */
 
 extern crate alloc;
 
+use alloc::vec::Vec;
+
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen::prelude::*;
 
