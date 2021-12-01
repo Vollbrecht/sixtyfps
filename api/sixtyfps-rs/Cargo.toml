@@ -27,6 +27,6 @@ vtable = { version = "0.1.4", path = "../../helper_crates/vtable" }
 sixtyfps-corelib = { version = "=0.1.6", path="../../sixtyfps_runtime/corelib", default-features = false }
 sixtyfps-rendering-backend-default = { version = "=0.1.6", path="../../sixtyfps_runtime/rendering_backends/default" }
 pin-weak = { version = "1.1", default-features = false }
-
+num-traits = { version = "0.2", default-features = false }
 [package.metadata.docs.rs]
 rustdoc-args = [ "--html-in-header", "docs/resources/sixtyfps-docs-preview.html", "--html-in-header", "docs/resources/sixtyfps-docs-highlight.html" ]

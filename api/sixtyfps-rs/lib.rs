@@ -260,6 +260,7 @@ pub mod re_exports {
     pub use alloc::{vec, vec::Vec};
     pub use const_field_offset::{self, FieldOffsets, PinnedDrop};
     pub use core::iter::FromIterator;
+    pub use num_traits::float::Float;
     pub use once_cell::race::OnceBox;
     pub use once_cell::unsync::OnceCell;
     pub use pin_weak::rc::PinWeak;
