@@ -1,0 +1,18 @@
+[package]
+name = "sixtyfps-rendering-backend-mcu-build"
+version = "0.1.6"
+authors = ["SixtyFPS <info@sixtyfps.io>"]
+edition = "2018"
+license = "GPL-3.0-only"
+description = "Helper for SixtyFPS build script"
+repository = "https://github.com/sixtyfpsui/sixtyfps"
+homepage = "https://sixtyfps.io"
+
+[features]
+
+pico-st7789 = []
+
+[lib]
+path = "lib.rs"
+
+[dependencies]

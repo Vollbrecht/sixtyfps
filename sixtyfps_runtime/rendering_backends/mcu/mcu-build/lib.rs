@@ -7,7 +7,14 @@
     This file is also available under commercial licensing terms.
     Please contact info@sixtyfps.io for more information.
 LICENSE END */
-fn main() {
-    sixtyfps_build::compile("../ui/printerdemo.60").unwrap();
-    sixtyfps_rendering_backend_mcu_build::configure_linker();
+
+pub fn configure_linker() {
+    #[cfg(feature = "pico-st7789")]
+    {
+        println!("cargo:rustc-link-arg=--nmagic");
+        println!("cargo:rustc-link-arg=-Tlink.x");
+        let memory_x_path: std::path::PathBuf =
+            [env!("CARGO_MANIFEST_DIR"), "pico_st7789"].iter().collect();
+        println!("cargo:rustc-link-search={}", memory_x_path.to_string_lossy());
+    }
 }

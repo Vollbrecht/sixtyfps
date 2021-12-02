@@ -19,6 +19,7 @@ only be used with `version = "=x.y.z"` in Cargo.toml.
 */
 #![doc(html_logo_url = "https://sixtyfps.io/resources/logo.drawio.svg")]
 #![cfg_attr(not(feature = "simulator"), no_std)]
+#![cfg_attr(not(feature = "simulator"), feature(alloc_error_handler))]
 
 extern crate alloc;
 
@@ -213,7 +214,7 @@ mod snapshotbackend {
         }
 
         fn duration_since_start(&'static self) -> core::time::Duration {
-            todo!()
+            Default::default()
         }
     }
 }
@@ -250,3 +251,9 @@ pub fn init_with_mock_display() {
         embedded_graphics::pixelcolor::Rgb888,
     >::new());
 }
+
+#[cfg(feature = "pico-st7789")]
+mod pico_st7789;
+
+#[cfg(feature = "pico-st7789")]
+pub use pico_st7789::*;

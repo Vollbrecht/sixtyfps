@@ -11,6 +11,11 @@ license = "GPL-3.0-only"
 path = "main.rs"
 name = "printerdemo"
 
+[features]
+
+mcu-simulator = ["sixtyfps-rendering-backend-mcu/simulator"]
+mcu-pico-st7789 = ["sixtyfps-rendering-backend-mcu/pico-st7789", "sixtyfps-rendering-backend-mcu-build/pico-st7789"]
+
 [dependencies]
 sixtyfps = { path = "../../../api/sixtyfps-rs", default-features = false }
 sixtyfps-corelib = { path = "../../../sixtyfps_runtime/corelib", default-features = false, features = ["libm"] }
@@ -19,9 +24,9 @@ chrono = { version = "0.4", default-features = false, features = ["clock", "std"
 
 once_cell = { version="1.8", features = ["atomic-polyfill"], default-features = false }
 
-
 [build-dependencies]
 sixtyfps-build = { path = "../../../api/sixtyfps-rs/sixtyfps-build" }
+sixtyfps-rendering-backend-mcu-build = { path = "../../../sixtyfps_runtime/rendering_backends/mcu/mcu-build" }
 
 # Remove the `#wasm#` to uncomment the wasm build.
 # This is commented out by default because we don't want to build it as a library by default

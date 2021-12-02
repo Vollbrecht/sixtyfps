@@ -9,6 +9,10 @@
 LICENSE END */
 
 #![no_std]
+#![cfg_attr(
+    all(feature = "sixtyfps-rendering-backend-mcu", not(feature = "mcu-simulator")),
+    no_main
+)]
 
 extern crate alloc;
 
@@ -49,10 +53,27 @@ impl PrinterQueueData {
     }
 }
 
+#[cfg(any(not(feature = "sixtyfps-rendering-backend-mcu"), feature = "mcu-simulator"))]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen(start))]
 pub fn main() {
-    #[cfg(feature = "sixtyfps-rendering-backend-mcu")]
+    printerdemo_main();
+}
+
+#[cfg(all(feature = "sixtyfps-rendering-backend-mcu", not(feature = "mcu-simulator")))]
+#[sixtyfps_rendering_backend_mcu::entry]
+fn main() -> ! {
+    printerdemo_main();
+    loop {}
+}
+
+fn printerdemo_main() {
+    #[cfg(feature = "mcu-simulator")]
     sixtyfps_rendering_backend_mcu::init_simulator();
+
+    #[cfg(feature = "mcu-pico-st7789")]
+    sixtyfps_rendering_backend_mcu::init_board(sixtyfps_rendering_backend_mcu::BoardConfig {
+        heap_size: 120 * 1024,
+    });
 
     // This provides better error messages in debug mode.
     // It's disabled in release mode so it doesn't bloat up the file size.
