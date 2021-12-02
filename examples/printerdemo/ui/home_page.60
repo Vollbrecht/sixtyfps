@@ -85,6 +85,7 @@ export HomePage := Page {
         }
     }
 
+    /* FIXME: these make us run out of memory/stack on the pico?
     PrintPage {
         x: current-subpage == 1 ? 0 : parent.width + parent.x + 2px;
         animate x { duration: 125ms; easing: ease; }
@@ -105,4 +106,5 @@ export HomePage := Page {
         animate x { duration: 125ms; easing: ease; }
         back => { current-subpage = 0 }
     }
+    */
 }
