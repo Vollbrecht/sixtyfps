@@ -9,7 +9,7 @@
 LICENSE END */
 
 #![no_std]
-#![cfg_attr(feature = "mcu-pico-st778", no_main)]
+#![cfg_attr(feature = "mcu-pico-st7789", no_main)]
 
 extern crate alloc;
 
