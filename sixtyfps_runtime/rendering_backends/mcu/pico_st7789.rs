@@ -17,7 +17,8 @@ use embedded_hal::digital::v2::OutputPin;
 
 pub use cortex_m_rt::entry;
 
-extern crate panic_halt;
+use defmt_rtt as _; // global logger
+use panic_probe as _;
 
 #[alloc_error_handler]
 fn oom(_: core::alloc::Layout) -> ! {
