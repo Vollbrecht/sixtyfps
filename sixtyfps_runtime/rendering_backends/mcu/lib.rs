@@ -19,7 +19,7 @@ only be used with `version = "=x.y.z"` in Cargo.toml.
 */
 #![doc(html_logo_url = "https://sixtyfps.io/resources/logo.drawio.svg")]
 #![cfg_attr(not(feature = "simulator"), no_std)]
-#![cfg_attr(not(feature = "simulator"), feature(alloc_error_handler))]
+#![cfg_attr(feature = "pico-st7789", feature(alloc_error_handler))]
 
 extern crate alloc;
 
@@ -185,7 +185,6 @@ mod snapshotbackend {
             &'static self,
             _behavior: sixtyfps_corelib::backend::EventLoopQuitBehavior,
         ) {
-            unimplemented!()
         }
 
         fn quit_event_loop(&'static self) {}
