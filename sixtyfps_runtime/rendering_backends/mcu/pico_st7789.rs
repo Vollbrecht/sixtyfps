@@ -25,14 +25,13 @@ fn oom(_: core::alloc::Layout) -> ! {
 }
 use alloc_cortex_m::CortexMHeap;
 
+const HEAP_SIZE: usize = 128 * 1024;
+static mut HEAP: [u8; HEAP_SIZE] = [0; HEAP_SIZE];
+
 #[global_allocator]
 static ALLOCATOR: CortexMHeap = CortexMHeap::empty();
 
-pub struct BoardConfig {
-    pub heap_size: usize,
-}
-
-pub fn init_board(config: BoardConfig) {
+pub fn init_board() {
     let mut pac = pac::Peripherals::take().unwrap();
     let core = pac::CorePeripherals::take().unwrap();
 
@@ -85,8 +84,7 @@ pub fn init_board(config: BoardConfig) {
         bl.set_high().unwrap();
     }
 
-    let start = cortex_m_rt::heap_start() as usize;
-    unsafe { ALLOCATOR.init(start, config.heap_size) }
+    unsafe { ALLOCATOR.init(&mut HEAP as *const u8 as usize, core::mem::size_of_val(&HEAP)) }
 
     display.init(&mut delay).unwrap();
     display.set_orientation(st7789::Orientation::Landscape).unwrap();

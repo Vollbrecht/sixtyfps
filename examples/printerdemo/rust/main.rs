@@ -72,9 +72,7 @@ pub fn main() {
 #[cfg(feature = "mcu-pico-st7789")]
 #[sixtyfps_rendering_backend_mcu::entry]
 fn main() -> ! {
-    sixtyfps_rendering_backend_mcu::init_board(sixtyfps_rendering_backend_mcu::BoardConfig {
-        heap_size: 120 * 1024,
-    });
+    sixtyfps_rendering_backend_mcu::init_board();
     printerdemo_main();
     loop {}
 }
