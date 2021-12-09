@@ -22,12 +22,15 @@ export UsbPage := Page {
                      + /* extra top-padding in design */ 27px;
         spacing: 24px;
 
+        /*
+        FIXME: this makes us exceed flash space on the pico
         Image {
             width: 50%;
             source: @image-url("images/cat_preview_round.png");
             image-fit: contain;
             rowspan: 5;
         }
+        */
 
         Label {
             col: 1;
