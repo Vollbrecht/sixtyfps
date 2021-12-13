@@ -15,7 +15,7 @@ use euclid::approxeq::ApproxEq;
 use items::{ImageFit, TextHorizontalAlignment, TextVerticalAlignment};
 use qttypes::QPainter;
 use sixtyfps_corelib::graphics::{
-    Brush, FontRequest, Image, Point, Rect, RenderingCache, SharedImageBuffer, Size,
+    Brush, FPSCounter, FontRequest, Image, Point, Rect, RenderingCache, SharedImageBuffer, Size,
 };
 use sixtyfps_corelib::input::{KeyEvent, KeyEventType, MouseEvent};
 use sixtyfps_corelib::item_rendering::{CachedRenderingData, ItemRenderer};
@@ -1079,6 +1079,8 @@ pub struct QtWindow {
     widget_ptr: QWidgetPtr,
     pub(crate) self_weak: Weak<sixtyfps_corelib::window::Window>,
 
+    fps_counter: Option<Rc<FPSCounter>>,
+
     cache: QtRenderingCache,
 }
 
@@ -1091,6 +1093,7 @@ impl QtWindow {
         let rc = Rc::new(QtWindow {
             widget_ptr,
             self_weak: window_weak.clone(),
+            fps_counter: FPSCounter::new(),
             cache: Default::default(),
         });
         let self_weak = Rc::downgrade(&rc);
@@ -1126,6 +1129,10 @@ impl QtWindow {
                     &mut renderer,
                     origin.clone(),
                 );
+            }
+
+            if let Some(fps_counter) = &self.fps_counter {
+                fps_counter.measure_frame_rendered(&mut renderer);
             }
 
             sixtyfps_corelib::animations::CURRENT_ANIMATION_DRIVER.with(|driver| {
@@ -1202,6 +1209,12 @@ impl PlatformWindow for QtWindow {
         cpp! {unsafe [widget_ptr as "QWidget*"] {
             widget_ptr->show();
         }};
+        if let Some(fps_counter) = &self.fps_counter {
+            let qt_platform_name = cpp! {unsafe [] -> qttypes::QString as "QString" {
+                return QGuiApplication::platformName();
+            }};
+            fps_counter.start(&format!("Qt backend (platform {})", qt_platform_name));
+        }
     }
 
     fn hide(self: Rc<Self>) {
