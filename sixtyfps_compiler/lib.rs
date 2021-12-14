@@ -48,6 +48,7 @@ pub mod object_tree;
 pub mod parser;
 pub mod typeloader;
 pub mod typeregister;
+pub mod llr;
 
 mod passes;
 
