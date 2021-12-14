@@ -21,6 +21,7 @@ mod compile_paths;
 mod const_propagation;
 mod deduplicate_property_read;
 mod default_geometry;
+mod embed_glyphs;
 mod embed_images;
 mod ensure_window;
 mod flickable;
@@ -162,6 +163,13 @@ pub async fn run_passes(
         std::iter::once(&*doc).chain(type_loader.all_documents()),
         compiler_config.embed_resources,
     );
+
+    embed_glyphs::embed_glyphs(
+        root_component,
+        std::iter::once(&*doc).chain(type_loader.all_documents()),
+        diag,
+    );
+
     root_component.is_root_component.set(true);
 }
 
