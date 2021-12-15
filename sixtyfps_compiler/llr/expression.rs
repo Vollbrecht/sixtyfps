@@ -10,6 +10,7 @@ LICENSE END */
 
 use std::collections::HashMap;
 
+use crate::expression_tree::BuiltinFunction;
 use crate::langtype::Type;
 
 use super::PropertyReference;
@@ -71,8 +72,12 @@ pub enum Expression {
     CodeBlock(Vec<Expression>),
 
     /// A function call
-    FunctionCall {
-        function: Box<Expression>,
+    BuiltinFunctionCall {
+        function: BuiltinFunction,
+        arguments: Vec<Expression>,
+    },
+    CallBackCall {
+        callback: PropertyReference,
         arguments: Vec<Expression>,
     },
 

@@ -19,16 +19,20 @@ use super::Expression;
 // Index in the `SubComponent::properties`
 pub type PropertyIndex = usize;
 
+#[derive(Debug)]
 pub enum Animation {
     /// The expression is a Struct with the animation fields
     Static(Expression),
     Transition(Expression),
 }
+
+#[derive(Debug)]
 pub struct BindingExpression {
     pub expression: Expression,
     pub animation: Option<Animation>,
 }
 
+#[derive(Debug)]
 pub struct GlobalComponent {
     pub name: String,
     pub properties: Vec<Property>,
@@ -48,12 +52,14 @@ pub enum PropertyReference {
     Global { global_index: usize, property_index: usize },
 }
 
+#[derive(Debug)]
 pub struct Property {
     pub name: String,
     pub ty: Type,
     //pub binding: Option<BindingExpression>,
 }
 
+#[derive(Debug)]
 pub struct RepeatedElement {
     pub model: Expression,
     /// Within the sub_tree's root component
@@ -63,6 +69,7 @@ pub struct RepeatedElement {
     pub sub_tree: ItemTree,
 }
 
+#[derive(Debug)]
 pub struct ItemType {
     // cpp_name: String,
 // rust_name: String,
@@ -71,16 +78,20 @@ pub struct ItemType {
 // extra_data_type: String,
 }
 
+#[derive(Debug)]
 pub struct Item {
     pub ty: Rc<ItemType>,
 }
 
+#[derive(Debug)]
 pub struct TreeNode {
     pub sub_component_path: Vec<usize>,
     pub item_index: usize,
+    pub repeated: bool,
     pub children: Vec<TreeNode>,
 }
 
+#[derive(Debug)]
 pub struct SubComponent {
     pub name: String,
     pub properties: Vec<Property>,
@@ -96,8 +107,15 @@ pub struct SubComponentInstance {
     //pub property_values: Vec<(PropertyReference, BindingExpression)>,
 }
 
+impl std::fmt::Debug for SubComponentInstance {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.ty.name)
+    }
+}
+
+#[derive(Debug)]
 pub struct ItemTree {
-    pub root: SubComponentInstance,
+    pub root: SubComponent,
     pub tree: TreeNode,
     /// This tree has a parent. e.g: it is a Repeater or a PopupMenu whose property can access
     /// the parent ItemTree.
@@ -105,6 +123,7 @@ pub struct ItemTree {
     pub parent_context: Option<String>,
 }
 
+#[derive(Debug)]
 pub struct PublicComponent {
     pub item_tree: ItemTree,
     pub sub_components: HashMap<String, Rc<SubComponent>>,

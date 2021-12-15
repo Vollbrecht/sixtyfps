@@ -43,10 +43,10 @@ impl ExpressionContext<'_> {
                 level += 1;
             }
             if let Some(level) = NonZeroUsize::new(level) {
-                PropertyReference::InParent {
+                return Some(PropertyReference::InParent {
                     level,
                     parent_reference: Box::new(map.mapping.map_property_reference(from, state)?),
-                };
+                });
             }
         }
         self.mapping.map_property_reference(from, state)
@@ -59,7 +59,7 @@ pub fn lower_expression(
 ) -> Option<llr_Expression> {
     match expression {
         tree_Expression::Invalid => None,
-        tree_Expression::Uncompiled(_) => None,
+        tree_Expression::Uncompiled(_) => panic!(),
         tree_Expression::StringLiteral(s) => Some(llr_Expression::StringLiteral(s.clone())),
         tree_Expression::NumberLiteral(n, _) => Some(llr_Expression::NumberLiteral(*n)),
         tree_Expression::BoolLiteral(b) => Some(llr_Expression::BoolLiteral(*b)),
@@ -69,10 +69,22 @@ pub fn lower_expression(
         tree_Expression::PropertyReference(nr) => Some(llr_Expression::PropertyReference(
             ctx.mapping.map_property_reference(nr, ctx.state)?,
         )),
-        tree_Expression::BuiltinFunctionReference(_, _) => todo!(),
-        tree_Expression::MemberFunction { .. } => None,
-        tree_Expression::BuiltinMacroReference(_, _) => None,
-        tree_Expression::ElementReference(_) => todo!(),
+        tree_Expression::BuiltinFunctionReference(_, _) => panic!(),
+        tree_Expression::MemberFunction { .. } => panic!(),
+        tree_Expression::BuiltinMacroReference(_, _) => panic!(),
+        tree_Expression::ElementReference(e) => {
+            // We map an element reference to a reference to the property "" inside that native item
+            Some(llr_Expression::PropertyReference(
+                ctx.mapping
+                    .map_property_reference(
+                        &NamedReference::new(&e.upgrade().unwrap(), ""),
+                        ctx.state,
+                    )
+                    .expect(
+                        "this should be a reference to a native item and it should always exist",
+                    ),
+            ))
+        }
         tree_Expression::RepeaterIndexReference { element } => {
             repeater_special_property(element, ctx.component, 1)
         }
@@ -105,13 +117,18 @@ pub fn lower_expression(
             expr.iter().map(|e| lower_expression(e, ctx)).collect::<Option<_>>()?,
         )),
         tree_Expression::FunctionCall { function, arguments, .. } => {
-            Some(llr_Expression::FunctionCall {
-                function: Box::new(lower_expression(function, ctx)?),
-                arguments: arguments
-                    .iter()
-                    .map(|e| lower_expression(e, ctx))
-                    .collect::<Option<_>>()?,
-            })
+            let arguments =
+                arguments.iter().map(|e| lower_expression(e, ctx)).collect::<Option<_>>()?;
+            match &**function {
+                tree_Expression::BuiltinFunctionReference(f, _) => {
+                    Some(llr_Expression::BuiltinFunctionCall { function: *f, arguments })
+                }
+                tree_Expression::CallbackReference(nr) => Some(llr_Expression::CallBackCall {
+                    callback: ctx.mapping.map_property_reference(nr, ctx.state)?,
+                    arguments,
+                }),
+                _ => panic!("not calling a function"),
+            }
         }
         tree_Expression::SelfAssignment { lhs, rhs, op } => Some(llr_Expression::SelfAssignment {
             lhs: Box::new(lower_expression(lhs, ctx)?),
@@ -177,8 +194,9 @@ pub fn lower_expression(
                     .map(Box::new),
             })
         }
-        tree_Expression::ComputeLayoutInfo(_, _) => todo!(),
-        tree_Expression::SolveLayout(_, _) => todo!(),
+        // TODO
+        tree_Expression::ComputeLayoutInfo(_, _) => None,
+        tree_Expression::SolveLayout(_, _) => None,
     }
 }
 

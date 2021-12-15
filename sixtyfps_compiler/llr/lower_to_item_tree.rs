@@ -34,8 +34,8 @@ pub fn lower_to_item_tree(component: &Rc<Component>) -> PublicComponent {
 
     let sc = lower_sub_component(component, &state, None);
     let item_tree = ItemTree {
-        root: SubComponentInstance { ty: sc.sub_component.clone() },
-        tree: make_tree(&state, component),
+        tree: make_tree(&state, &component.root_element, &sc, &[]),
+        root: Rc::try_unwrap(sc.sub_component).unwrap(),
         parent_context: None,
     };
     PublicComponent {
@@ -58,13 +58,14 @@ pub struct LoweringState {
 #[derive(Debug, Clone)]
 pub enum LoweredElement {
     SubComponent { sub_component_index: usize },
-    NativeItem { item_index: usize }, //property_mapping: HashMap<String, (Vec<usize>, PropertyIndex)>,
+    NativeItem { item_index: usize },
+    Repeated { repeated_index: usize },
 }
 
 #[derive(Default, Debug, Clone)]
 pub struct LoweredSubComponentMapping {
-    element_mapping: HashMap<ByAddress<ElementRc>, LoweredElement>,
-    property_mapping: HashMap<NamedReference, PropertyReference>,
+    pub element_mapping: HashMap<ByAddress<ElementRc>, LoweredElement>,
+    pub property_mapping: HashMap<NamedReference, PropertyReference>,
 }
 
 impl LoweredSubComponentMapping {
@@ -99,6 +100,7 @@ impl LoweredSubComponentMapping {
                     prop_name: from.name().into(),
                 });
             }
+            LoweredElement::Repeated { .. } => unreachable!(),
         }
     }
 }
@@ -208,6 +210,10 @@ fn lower_sub_component(
             }
         }
         if elem.repeated.is_some() {
+            mapping.element_mapping.insert(
+                element.clone().into(),
+                LoweredElement::Repeated { repeated_index: repeated.len() },
+            );
             repeated.push(element.clone());
             return;
         }
@@ -273,9 +279,8 @@ fn lower_sub_component(
                 .push((prop.clone(), BindingExpression { expression, animation }))
         }
     }
-    for elem in repeated {
-        sub_component.repeated.push(lower_repeated_component(&elem, &ctx))
-    }
+    sub_component.repeated =
+        repeated.into_iter().map(|elem| lower_repeated_component(&elem, &ctx)).collect();
     LoweredSubComponent { sub_component: Rc::new(sub_component), mapping }
 }
 
@@ -284,12 +289,12 @@ fn lower_repeated_component(elem: &ElementRc, ctx: &ExpressionContext) -> Repeat
     let component = e.base_type.as_component().clone();
     let repeated = e.repeated.as_ref().unwrap();
 
-    let sc = ctx.state.sub_component(&component);
+    let sc = lower_sub_component(&component, &ctx.state, None);
     RepeatedElement {
         model: super::lower_expression::lower_expression(&repeated.model, ctx).unwrap(),
         sub_tree: ItemTree {
-            root: SubComponentInstance { ty: sc.sub_component.clone() },
-            tree: make_tree(ctx.state, &component),
+            tree: make_tree(ctx.state, &component.root_element, &sc, &[]),
+            root: Rc::try_unwrap(sc.sub_component).unwrap(),
             parent_context: Some(e.enclosing_component.upgrade().unwrap().id.clone()),
         },
         index_prop: 1,
@@ -340,6 +345,42 @@ fn lower_global(
     GlobalComponent { name: global.id.clone(), properties, init_values }
 }
 
-fn make_tree(state: &LoweringState, component: &Rc<Component>) -> TreeNode {
-    todo!()
+fn make_tree(
+    state: &LoweringState,
+    element: &ElementRc,
+    component: &LoweredSubComponent,
+    sub_component_path: &[usize],
+) -> TreeNode {
+    let e = element.borrow();
+    let children = e.children.iter().map(|c| make_tree(state, c, component, sub_component_path));
+    match component.mapping.element_mapping.get(&ByAddress(element.clone())).unwrap() {
+        LoweredElement::SubComponent { sub_component_index } => {
+            let sub_component = e.sub_component().unwrap();
+            let new_sub_component_path = sub_component_path
+                .iter()
+                .copied()
+                .chain(std::iter::once(*sub_component_index))
+                .collect::<Vec<_>>();
+            let mut tree_node = make_tree(
+                state,
+                &sub_component.root_element,
+                state.sub_component(sub_component),
+                &new_sub_component_path,
+            );
+            tree_node.children.extend(children);
+            tree_node
+        }
+        LoweredElement::NativeItem { item_index } => TreeNode {
+            sub_component_path: sub_component_path.into(),
+            item_index: *item_index,
+            children: children.collect(),
+            repeated: false,
+        },
+        LoweredElement::Repeated { repeated_index } => TreeNode {
+            sub_component_path: sub_component_path.into(),
+            item_index: *repeated_index,
+            children: vec![],
+            repeated: true,
+        },
+    }
 }
