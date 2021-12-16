@@ -127,9 +127,7 @@ pub enum Expression {
         values: HashMap<String, Expression>,
     },
 
-    PathElements {
-        elements: crate::expression_tree::PathEvents,
-    },
+    PathEvents(crate::expression_tree::PathEvents),
 
     EasingCurve(crate::expression_tree::EasingCurve),
 
@@ -191,7 +189,7 @@ impl Expression {
             },
             Type::Bool => Expression::BoolLiteral(false),
             Type::Model => return None,
-            Type::PathElements => Expression::PathElements { elements: Default::default() },
+            Type::PathElements => Expression::PathEvents(Default::default()),
             Type::Array(element_ty) => {
                 Expression::Array { element_ty: (**element_ty).clone(), values: vec![] }
             }
@@ -247,7 +245,7 @@ impl Expression {
             Self::Condition { true_expr, .. } => true_expr.ty(),
             Self::Array { element_ty, .. } => Type::Array(element_ty.clone().into()),
             Self::Struct { ty, .. } => ty.clone(),
-            Self::PathElements { .. } => todo!(),
+            Self::PathEvents { .. } => todo!(),
             Self::EasingCurve(_) => Type::Easing,
             Self::LinearGradient { .. } => Type::Brush,
             Self::EnumerationValue(e) => Type::Enumeration(e.enumeration.clone()),

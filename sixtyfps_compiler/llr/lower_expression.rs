@@ -168,10 +168,7 @@ pub fn lower_expression(
                 .map(|(s, e)| Some((s.clone(), lower_expression(e, ctx)?)))
                 .collect::<Option<_>>()?,
         }),
-        tree_Expression::PathElements { elements } => match elements {
-            crate::expression_tree::Path::Elements(_) => todo!(),
-            crate::expression_tree::Path::Events(_) => todo!(),
-        },
+        tree_Expression::PathElements { elements } => compile_path(elements, ctx),
         tree_Expression::EasingCurve(x) => Some(llr_Expression::EasingCurve(x.clone())),
         tree_Expression::LinearGradient { angle, stops } => Some(llr_Expression::LinearGradient {
             angle: Box::new(lower_expression(angle, ctx)?),
@@ -440,38 +437,32 @@ fn solve_layout(
                 ]))
             }
         }
-        crate::layout::Layout::PathLayout(_layout) => {
-            todo!();
-            /*
+        crate::layout::Layout::PathLayout(layout) => {
             let width = layout_geometry_size(&layout.rect, Orientation::Horizontal, ctx)?;
             let height = layout_geometry_size(&layout.rect, Orientation::Vertical, ctx)?;
             let elements = compile_path(&layout.path, ctx)?;
-            let get_prop = |expr| {
-                Some(if let Some(expr) = expr {
-                    llr_Expression::PropertyReference(ctx.map_property_reference(expr)?)
-                } else {
-                    llr_Expression::NumberLiteral(0.)
-                })
+            let offset = if let Some(expr) = &layout.offset_reference {
+                llr_Expression::PropertyReference(ctx.map_property_reference(expr)?)
+            } else {
+                llr_Expression::NumberLiteral(0.)
             };
 
-            let offset = get_prop(&layout.offset_reference)?;
             let count = layout.elements.len(); // FIXME! repeater
             Some(llr_Expression::ExtraBuiltinFunctionCall {
                 function: "solve_path_layout".into(),
                 arguments: vec![make_struct(
                     "PathLayoutData".into(),
                     [
-                        ("width", width),
-                        ("height", height),
-                        ("x", llr_Expression::NumberLiteral(0.)),
-                        ("y", llr_Expression::NumberLiteral(0.)),
-                        ("elements", elements),
-                        ("offset", offset),
-                        ("item_count", llr_Expression::NumberLiteral(count)),
+                        ("width", Type::Float32, width),
+                        ("height", Type::Float32, height),
+                        ("x", Type::Float32, llr_Expression::NumberLiteral(0.)),
+                        ("y", Type::Float32, llr_Expression::NumberLiteral(0.)),
+                        ("elements", elements.ty(), elements),
+                        ("offset", Type::Int32, offset),
+                        ("item_count", Type::Int32, llr_Expression::NumberLiteral(count as _)),
                     ],
                 )],
             })
-            */
         }
     }
 }
@@ -677,6 +668,56 @@ fn get_layout_info(
         Some(llr_Expression::Struct { ty, values })
     } else {
         Some(layout_info)
+    }
+}
+
+fn compile_path(
+    path: &crate::expression_tree::Path,
+    ctx: &ExpressionContext,
+) -> Option<llr_Expression> {
+    match path {
+        crate::expression_tree::Path::Elements(elements) => {
+            let converted_elements = elements
+                .iter()
+                .map(|element| {
+                    let ty = Type::Struct {
+                        fields: element
+                            .element_type
+                            .properties
+                            .iter()
+                            .map(|(k, v)| (k.clone(), v.ty.clone()))
+                            .collect(),
+                        name: element.element_type.native_class.cpp_type.clone(),
+                        node: None,
+                    };
+
+                    llr_Expression::Struct {
+                        ty,
+                        values: element
+                            .bindings
+                            .iter()
+                            .map(|(property, expr)| {
+                                (
+                                    property.clone(),
+                                    lower_expression(&expr.borrow().expression, ctx).unwrap(),
+                                )
+                            })
+                            .collect(),
+                    }
+                })
+                .collect();
+            Some(llr_Expression::Cast {
+                from: llr_Expression::Array {
+                    element_ty: Type::PathElements,
+                    values: converted_elements,
+                }
+                .into(),
+                to: Type::PathElements,
+            })
+        }
+        crate::expression_tree::Path::Events(events) => {
+            Some(llr_Expression::PathEvents(events.clone()))
+        }
     }
 }
 
