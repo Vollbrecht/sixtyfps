@@ -9,13 +9,17 @@
 LICENSE END */
 
 use std::cell::RefCell;
+use std::collections::{BTreeMap, HashMap};
 use std::num::NonZeroUsize;
 use std::rc::{Rc, Weak};
 
-use super::lower_to_item_tree::{LoweredSubComponentMapping, LoweringState};
+use itertools::Either;
+
+use super::lower_to_item_tree::{LoweredElement, LoweredSubComponentMapping, LoweringState};
 use super::{Animation, PropertyReference};
 use crate::expression_tree::Expression as tree_Expression;
-use crate::langtype::Type;
+use crate::langtype::{EnumerationValue, Type};
+use crate::layout::Orientation;
 use crate::llr::Expression as llr_Expression;
 use crate::namedreference::NamedReference;
 use crate::object_tree::{Element, ElementRc, PropertyAnimation};
@@ -28,11 +32,7 @@ pub struct ExpressionContext<'a> {
 }
 
 impl ExpressionContext<'_> {
-    pub fn map_property_reference(
-        &self,
-        from: &NamedReference,
-        state: &LoweringState,
-    ) -> Option<PropertyReference> {
+    pub fn map_property_reference(&self, from: &NamedReference) -> Option<PropertyReference> {
         let element = from.element();
         let enclosing = &element.borrow().enclosing_component.upgrade().unwrap();
         if !enclosing.is_global() {
@@ -45,11 +45,13 @@ impl ExpressionContext<'_> {
             if let Some(level) = NonZeroUsize::new(level) {
                 return Some(PropertyReference::InParent {
                     level,
-                    parent_reference: Box::new(map.mapping.map_property_reference(from, state)?),
+                    parent_reference: Box::new(
+                        map.mapping.map_property_reference(from, self.state)?,
+                    ),
                 });
             }
         }
-        self.mapping.map_property_reference(from, state)
+        self.mapping.map_property_reference(from, self.state)
     }
 }
 
@@ -194,9 +196,8 @@ pub fn lower_expression(
                     .map(Box::new),
             })
         }
-        // TODO
-        tree_Expression::ComputeLayoutInfo(_, _) => None,
-        tree_Expression::SolveLayout(_, _) => None,
+        tree_Expression::ComputeLayoutInfo(l, o) => compute_layout_info(l, *o, ctx),
+        tree_Expression::SolveLayout(l, o) => solve_layout(l, *o, ctx),
     }
 }
 
@@ -280,4 +281,415 @@ pub fn lower_animation(a: &PropertyAnimation, ctx: &ExpressionContext<'_>) -> Op
             Some(Animation::Transition(llr_Expression::CodeBlock(vec![set_state, get_anim])))
         }
     }
+}
+
+fn compute_layout_info(
+    l: &crate::layout::Layout,
+    o: Orientation,
+    ctx: &ExpressionContext,
+) -> Option<llr_Expression> {
+    match l {
+        crate::layout::Layout::GridLayout(layout) => {
+            let (padding, spacing) = generate_layout_padding_and_spacing(&layout.geometry, o, ctx)?;
+            let cells = grid_layout_cell_data(layout, o, ctx)?;
+            Some(llr_Expression::ExtraBuiltinFunctionCall {
+                function: "grid_layout_info".into(),
+                arguments: vec![cells, spacing, padding],
+            })
+        }
+        crate::layout::Layout::BoxLayout(layout) => {
+            let (padding, spacing) = generate_layout_padding_and_spacing(&layout.geometry, o, ctx)?;
+            let (cells, alignment) = box_layout_data(layout, o, ctx, None)?;
+            if o == layout.orientation {
+                Some(llr_Expression::ExtraBuiltinFunctionCall {
+                    function: "box_layout_info".into(),
+                    arguments: vec![cells, spacing, padding, alignment],
+                })
+            } else {
+                Some(llr_Expression::ExtraBuiltinFunctionCall {
+                    function: "box_layout_info_ortho".into(),
+                    arguments: vec![cells, padding],
+                })
+            }
+        }
+        crate::layout::Layout::PathLayout(_) => unimplemented!(),
+    }
+}
+
+fn solve_layout(
+    l: &crate::layout::Layout,
+    o: Orientation,
+    ctx: &ExpressionContext,
+) -> Option<llr_Expression> {
+    match l {
+        crate::layout::Layout::GridLayout(layout) => {
+            let (padding, spacing) = generate_layout_padding_and_spacing(&layout.geometry, o, ctx)?;
+            let cells = grid_layout_cell_data(layout, o, ctx)?;
+            let size = layout_geometry_size(&layout.geometry.rect, o, ctx)?;
+            if let (Some(button_roles), Orientation::Horizontal) = (&layout.dialog_button_roles, o)
+            {
+                let cells_ty = cells.ty();
+                let e = crate::typeregister::DIALOG_BUTTON_ROLE_ENUM.with(|e| e.clone());
+                let roles = button_roles
+                    .iter()
+                    .map(|r| {
+                        llr_Expression::EnumerationValue(EnumerationValue {
+                            value: e.values.iter().position(|x| x == r).unwrap() as _,
+                            enumeration: e.clone(),
+                        })
+                    })
+                    .collect();
+                Some(llr_Expression::CodeBlock(vec![
+                    llr_Expression::StoreLocalVariable {
+                        name: "cells".into(),
+                        value: Box::new(cells),
+                    },
+                    llr_Expression::ExtraBuiltinFunctionCall {
+                        function: "reorder_dialog_button_layout".into(),
+                        arguments: vec![
+                            llr_Expression::ReadLocalVariable {
+                                name: "cells".into(),
+                                ty: cells_ty.clone(),
+                            },
+                            llr_Expression::Array {
+                                element_ty: Type::Enumeration(e),
+                                values: roles,
+                            },
+                        ],
+                    },
+                    llr_Expression::ExtraBuiltinFunctionCall {
+                        function: "solve_grid_layout".into(),
+                        arguments: vec![make_struct(
+                            "GridLayoutData".into(),
+                            [
+                                ("size", Type::Float32, size),
+                                ("spacing", Type::Float32, spacing),
+                                ("padding", padding.ty(), padding),
+                                (
+                                    "cells",
+                                    cells_ty.clone(),
+                                    llr_Expression::ReadLocalVariable {
+                                        name: "cells".into(),
+                                        ty: cells_ty,
+                                    },
+                                ),
+                            ],
+                        )],
+                    },
+                ]))
+            } else {
+                Some(llr_Expression::ExtraBuiltinFunctionCall {
+                    function: "solve_grid_layout".into(),
+                    arguments: vec![make_struct(
+                        "GridLayoutData".into(),
+                        [
+                            ("size", Type::Float32, size),
+                            ("spacing", Type::Float32, spacing),
+                            ("padding", padding.ty(), padding),
+                            ("cells", cells.ty(), cells),
+                        ],
+                    )],
+                })
+            }
+        }
+        crate::layout::Layout::BoxLayout(layout) => {
+            let (padding, spacing) = generate_layout_padding_and_spacing(&layout.geometry, o, ctx)?;
+            let mut repeated_indices = String::new();
+            let (cells, alignment) = box_layout_data(layout, o, ctx, Some(&mut repeated_indices))?;
+            let size = layout_geometry_size(&layout.geometry.rect, o, ctx)?;
+            let data = make_struct(
+                "BoxLayoutData".into(),
+                [
+                    ("size", Type::Float32, size),
+                    ("spacing", Type::Float32, spacing),
+                    ("padding", padding.ty(), padding),
+                    (
+                        "alignment",
+                        crate::typeregister::LAYOUT_ALIGNMENT_ENUM
+                            .with(|e| Type::Enumeration(e.clone())),
+                        alignment,
+                    ),
+                    ("cells", cells.ty(), cells),
+                ],
+            );
+            if repeated_indices.is_empty() {
+                Some(llr_Expression::ExtraBuiltinFunctionCall {
+                    function: "solve_grid_layout".into(),
+                    arguments: vec![
+                        data,
+                        llr_Expression::Array { element_ty: Type::Int32, values: vec![] },
+                    ],
+                })
+            } else {
+                Some(llr_Expression::CodeBlock(vec![
+                    llr_Expression::StoreLocalVariable {
+                        name: repeated_indices.clone(),
+                        value: llr_Expression::Array { element_ty: Type::Int32, values: vec![] }
+                            .into(),
+                    },
+                    llr_Expression::ExtraBuiltinFunctionCall {
+                        function: "solve_grid_layout".into(),
+                        arguments: vec![
+                            data,
+                            llr_Expression::ReadLocalVariable {
+                                name: repeated_indices,
+                                ty: Type::Array(Type::Int32.into()),
+                            },
+                        ],
+                    },
+                ]))
+            }
+        }
+        crate::layout::Layout::PathLayout(_layout) => {
+            todo!();
+            /*
+            let width = layout_geometry_size(&layout.rect, Orientation::Horizontal, ctx)?;
+            let height = layout_geometry_size(&layout.rect, Orientation::Vertical, ctx)?;
+            let elements = compile_path(&layout.path, ctx)?;
+            let get_prop = |expr| {
+                Some(if let Some(expr) = expr {
+                    llr_Expression::PropertyReference(ctx.map_property_reference(expr)?)
+                } else {
+                    llr_Expression::NumberLiteral(0.)
+                })
+            };
+
+            let offset = get_prop(&layout.offset_reference)?;
+            let count = layout.elements.len(); // FIXME! repeater
+            Some(llr_Expression::ExtraBuiltinFunctionCall {
+                function: "solve_path_layout".into(),
+                arguments: vec![make_struct(
+                    "PathLayoutData".into(),
+                    [
+                        ("width", width),
+                        ("height", height),
+                        ("x", llr_Expression::NumberLiteral(0.)),
+                        ("y", llr_Expression::NumberLiteral(0.)),
+                        ("elements", elements),
+                        ("offset", offset),
+                        ("item_count", llr_Expression::NumberLiteral(count)),
+                    ],
+                )],
+            })
+            */
+        }
+    }
+}
+
+fn box_layout_data(
+    layout: &crate::layout::BoxLayout,
+    orientation: Orientation,
+    ctx: &ExpressionContext,
+    repeater_indices: Option<&mut String>,
+) -> Option<(llr_Expression, llr_Expression)> {
+    let alignment = if let Some(expr) = &layout.geometry.alignment {
+        llr_Expression::PropertyReference(ctx.map_property_reference(expr)?)
+    } else {
+        let e = crate::typeregister::LAYOUT_ALIGNMENT_ENUM.with(|e| e.clone());
+        llr_Expression::EnumerationValue(EnumerationValue {
+            value: e.default_value,
+            enumeration: e,
+        })
+    };
+
+    let repeater_count =
+        layout.elems.iter().filter(|i| i.element.borrow().repeated.is_some()).count();
+
+    let element_ty = Type::Struct {
+        fields: IntoIterator::into_iter([(
+            "constraint".to_string(),
+            crate::layout::layout_info_type(),
+        )])
+        .collect(),
+        name: Some("BoxLayoutCellData".into()),
+        node: None,
+    };
+
+    if repeater_count == 0 {
+        let cells = llr_Expression::Array {
+            values: layout
+                .elems
+                .iter()
+                .map(|li| {
+                    let layout_info =
+                        get_layout_info(&li.element, ctx, &li.constraints, orientation).unwrap();
+                    make_struct(
+                        "BoxLayoutCellData".into(),
+                        [("constraint", crate::layout::layout_info_type(), layout_info)],
+                    )
+                })
+                .collect(),
+            element_ty,
+        };
+        Some((cells, alignment))
+    } else {
+        let mut elements = vec![];
+        for item in &layout.elems {
+            if item.element.borrow().repeated.is_some() {
+                let repeater_index =
+                    match ctx.mapping.element_mapping.get(&item.element.clone().into()).unwrap() {
+                        LoweredElement::Repeated { repeated_index } => *repeated_index,
+                        _ => panic!(),
+                    };
+                elements.push(Either::Right(repeater_index))
+            } else {
+                let layout_info =
+                    get_layout_info(&item.element, ctx, &item.constraints, orientation).unwrap();
+                elements.push(Either::Left(make_struct(
+                    "BoxLayoutCellData".into(),
+                    [("constraint", crate::layout::layout_info_type(), layout_info)],
+                )));
+            }
+        }
+        Some((
+            llr_Expression::BoxLayoutCellDataArray {
+                elements,
+                repeater_indices: repeater_indices.map(|ri| {
+                    *ri = "repeater_indices".into();
+                    (*ri).clone()
+                }),
+            },
+            alignment,
+        ))
+    }
+}
+
+fn grid_layout_cell_data(
+    layout: &crate::layout::GridLayout,
+    orientation: Orientation,
+    ctx: &ExpressionContext,
+) -> Option<llr_Expression> {
+    Some(llr_Expression::Array {
+        element_ty: Type::Struct {
+            fields: IntoIterator::into_iter([
+                ("col_or_row".to_string(), Type::Int32),
+                ("span".to_string(), Type::Int32),
+                ("constraint".to_string(), crate::layout::layout_info_type()),
+            ])
+            .collect(),
+            name: Some("GridLayoutCellData".into()),
+            node: None,
+        },
+        values: layout
+            .elems
+            .iter()
+            .map(|c| {
+                let (col_or_row, span) = c.col_or_row_and_span(orientation);
+                let layout_info =
+                    get_layout_info(&c.item.element, ctx, &c.item.constraints, orientation)
+                        .unwrap();
+
+                make_struct(
+                    "BoxLayoutCellData".into(),
+                    [
+                        ("constraint", crate::layout::layout_info_type(), layout_info),
+                        ("col_or_row", Type::Int32, llr_Expression::NumberLiteral(col_or_row as _)),
+                        ("span", Type::Int32, llr_Expression::NumberLiteral(span as _)),
+                    ],
+                )
+            })
+            .collect(),
+    })
+}
+
+fn generate_layout_padding_and_spacing(
+    layout_geometry: &crate::layout::LayoutGeometry,
+    orientation: Orientation,
+    ctx: &ExpressionContext,
+) -> Option<(llr_Expression, llr_Expression)> {
+    let padding_prop = |expr| {
+        Some(if let Some(expr) = expr {
+            llr_Expression::PropertyReference(ctx.map_property_reference(expr)?)
+        } else {
+            llr_Expression::NumberLiteral(0.)
+        })
+    };
+    let spacing = padding_prop(layout_geometry.spacing.as_ref())?;
+    let (begin, end) = layout_geometry.padding.begin_end(orientation);
+
+    let padding = make_struct(
+        "Padding".into(),
+        [
+            ("begin", Type::Float32, padding_prop(begin)?),
+            ("end", Type::Float32, padding_prop(end)?),
+        ],
+    );
+
+    Some((padding, spacing))
+}
+
+fn layout_geometry_size(
+    rect: &crate::layout::LayoutRect,
+    orientation: Orientation,
+    ctx: &ExpressionContext,
+) -> Option<llr_Expression> {
+    match rect.size_reference(orientation) {
+        Some(nr) => Some(llr_Expression::PropertyReference(ctx.map_property_reference(nr)?)),
+        None => Some(llr_Expression::NumberLiteral(0.)),
+    }
+}
+
+fn get_layout_info(
+    elem: &ElementRc,
+    ctx: &ExpressionContext,
+    constraints: &crate::layout::LayoutConstraints,
+    orientation: Orientation,
+) -> Option<llr_Expression> {
+    let layout_info = if let Some(layout_info_prop) = &elem.borrow().layout_info_prop(orientation) {
+        llr_Expression::PropertyReference(ctx.map_property_reference(layout_info_prop)?)
+    } else {
+        lower_expression(&crate::layout::implicit_layout_info_call(elem, orientation), ctx)?
+    };
+
+    if constraints.has_explicit_restrictions() {
+        llr_Expression::StoreLocalVariable {
+            name: "layout_info".into(),
+            value: layout_info.into(),
+        };
+        let ty = crate::layout::layout_info_type();
+        let fields = match &ty {
+            Type::Struct { fields, .. } => fields,
+            _ => panic!(),
+        };
+        let mut values = fields
+            .keys()
+            .map(|p| {
+                (
+                    p.clone(),
+                    llr_Expression::StructFieldAccess {
+                        base: llr_Expression::ReadLocalVariable {
+                            name: "layout_info".into(),
+                            ty: ty.clone(),
+                        }
+                        .into(),
+                        name: p.clone(),
+                    },
+                )
+            })
+            .collect::<HashMap<_, _>>();
+
+        for (nr, s) in constraints.for_each_restrictions(orientation) {
+            values.insert(
+                s.into(),
+                llr_Expression::PropertyReference(ctx.map_property_reference(nr)?),
+            );
+        }
+        Some(llr_Expression::Struct { ty, values })
+    } else {
+        Some(layout_info)
+    }
+}
+
+fn make_struct(
+    name: String,
+    it: impl IntoIterator<Item = (&'static str, Type, llr_Expression)>,
+) -> llr_Expression {
+    let mut fields = BTreeMap::<String, Type>::new();
+    let mut values = HashMap::<String, llr_Expression>::new();
+    for (name, ty, expr) in it {
+        fields.insert(name.to_string(), ty);
+        values.insert(name.to_string(), expr);
+    }
+
+    llr_Expression::Struct { ty: Type::Struct { fields, name: Some(name), node: None }, values }
 }
