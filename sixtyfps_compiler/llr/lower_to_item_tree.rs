@@ -169,6 +169,7 @@ fn lower_sub_component(
         properties: Default::default(),
         items: Default::default(),
         repeated: Default::default(),
+        popup_windows: Default::default(),
         sub_components: Default::default(),
         property_init: Default::default(),
         two_way_bindings: Default::default(),
@@ -281,6 +282,12 @@ fn lower_sub_component(
     }
     sub_component.repeated =
         repeated.into_iter().map(|elem| lower_repeated_component(&elem, &ctx)).collect();
+    sub_component.popup_windows = component
+        .popup_windows
+        .borrow()
+        .iter()
+        .map(|popup| lower_popup_component(&popup.component, &ctx))
+        .collect();
     LoweredSubComponent { sub_component: Rc::new(sub_component), mapping }
 }
 
@@ -289,7 +296,7 @@ fn lower_repeated_component(elem: &ElementRc, ctx: &ExpressionContext) -> Repeat
     let component = e.base_type.as_component().clone();
     let repeated = e.repeated.as_ref().unwrap();
 
-    let sc = lower_sub_component(&component, &ctx.state, None);
+    let sc = lower_sub_component(&component, &ctx.state, Some(ctx));
     RepeatedElement {
         model: super::lower_expression::lower_expression(&repeated.model, ctx).unwrap(),
         sub_tree: ItemTree {
@@ -299,6 +306,26 @@ fn lower_repeated_component(elem: &ElementRc, ctx: &ExpressionContext) -> Repeat
         },
         index_prop: 1,
         data_prop: 0,
+    }
+}
+
+fn lower_popup_component(component: &Rc<Component>, ctx: &ExpressionContext) -> ItemTree {
+    let sc = lower_sub_component(component, &ctx.state, Some(ctx));
+    ItemTree {
+        tree: make_tree(ctx.state, &component.root_element, &sc, &[]),
+        root: Rc::try_unwrap(sc.sub_component).unwrap(),
+        parent_context: Some(
+            component
+                .parent_element
+                .upgrade()
+                .unwrap()
+                .borrow()
+                .enclosing_component
+                .upgrade()
+                .unwrap()
+                .id
+                .clone(),
+        ),
     }
 }
 

@@ -17,7 +17,7 @@ use itertools::Either;
 
 use super::lower_to_item_tree::{LoweredElement, LoweredSubComponentMapping, LoweringState};
 use super::{Animation, PropertyReference};
-use crate::expression_tree::Expression as tree_Expression;
+use crate::expression_tree::{BuiltinFunction, Expression as tree_Expression};
 use crate::langtype::{EnumerationValue, Type};
 use crate::layout::Orientation;
 use crate::llr::Expression as llr_Expression;
@@ -65,12 +65,12 @@ pub fn lower_expression(
         tree_Expression::StringLiteral(s) => Some(llr_Expression::StringLiteral(s.clone())),
         tree_Expression::NumberLiteral(n, _) => Some(llr_Expression::NumberLiteral(*n)),
         tree_Expression::BoolLiteral(b) => Some(llr_Expression::BoolLiteral(*b)),
-        tree_Expression::CallbackReference(nr) => Some(llr_Expression::PropertyReference(
-            ctx.mapping.map_property_reference(nr, ctx.state)?,
-        )),
-        tree_Expression::PropertyReference(nr) => Some(llr_Expression::PropertyReference(
-            ctx.mapping.map_property_reference(nr, ctx.state)?,
-        )),
+        tree_Expression::CallbackReference(nr) => {
+            Some(llr_Expression::PropertyReference(ctx.map_property_reference(nr)?))
+        }
+        tree_Expression::PropertyReference(nr) => {
+            Some(llr_Expression::PropertyReference(ctx.map_property_reference(nr)?))
+        }
         tree_Expression::BuiltinFunctionReference(_, _) => panic!(),
         tree_Expression::MemberFunction { .. } => panic!(),
         tree_Expression::BuiltinMacroReference(_, _) => panic!(),
@@ -118,20 +118,25 @@ pub fn lower_expression(
         tree_Expression::CodeBlock(expr) => Some(llr_Expression::CodeBlock(
             expr.iter().map(|e| lower_expression(e, ctx)).collect::<Option<_>>()?,
         )),
-        tree_Expression::FunctionCall { function, arguments, .. } => {
-            let arguments =
-                arguments.iter().map(|e| lower_expression(e, ctx)).collect::<Option<_>>()?;
-            match &**function {
-                tree_Expression::BuiltinFunctionReference(f, _) => {
-                    Some(llr_Expression::BuiltinFunctionCall { function: *f, arguments })
-                }
-                tree_Expression::CallbackReference(nr) => Some(llr_Expression::CallBackCall {
-                    callback: ctx.mapping.map_property_reference(nr, ctx.state)?,
-                    arguments,
-                }),
-                _ => panic!("not calling a function"),
+        tree_Expression::FunctionCall { function, arguments, .. } => match &**function {
+            tree_Expression::BuiltinFunctionReference(BuiltinFunction::ShowPopupWindow, _) => {
+                lower_show_popup(arguments, ctx)
             }
-        }
+            tree_Expression::BuiltinFunctionReference(f, _) => {
+                let arguments =
+                    arguments.iter().map(|e| lower_expression(e, ctx)).collect::<Option<_>>()?;
+                Some(llr_Expression::BuiltinFunctionCall { function: *f, arguments })
+            }
+            tree_Expression::CallbackReference(nr) => {
+                let arguments =
+                    arguments.iter().map(|e| lower_expression(e, ctx)).collect::<Option<_>>()?;
+                Some(llr_Expression::CallBackCall {
+                    callback: ctx.map_property_reference(nr)?,
+                    arguments,
+                })
+            }
+            _ => panic!("not calling a function"),
+        },
         tree_Expression::SelfAssignment { lhs, rhs, op } => Some(llr_Expression::SelfAssignment {
             lhs: Box::new(lower_expression(lhs, ctx)?),
             rhs: Box::new(lower_expression(rhs, ctx)?),
@@ -222,6 +227,39 @@ fn repeater_special_property(
         r = PropertyReference::InParent { level, parent_reference: Box::new(r) };
     }
     Some(llr_Expression::PropertyReference(r))
+}
+
+fn lower_show_popup(args: &[tree_Expression], ctx: &ExpressionContext) -> Option<llr_Expression> {
+    if let [tree_Expression::ElementReference(e)] = args {
+        let popup_window = e.upgrade().unwrap();
+        let pop_comp = popup_window.borrow().enclosing_component.upgrade().unwrap();
+        let parent_component = pop_comp
+            .parent_element
+            .upgrade()
+            .unwrap()
+            .borrow()
+            .enclosing_component
+            .upgrade()
+            .unwrap();
+        let popup_list = parent_component.popup_windows.borrow();
+        let (popup_index, popup) = popup_list
+            .iter()
+            .enumerate()
+            .find(|(_, p)| Rc::ptr_eq(&p.component, &pop_comp))
+            .unwrap();
+        let x = llr_Expression::PropertyReference(ctx.map_property_reference(&popup.x)?);
+        let y = llr_Expression::PropertyReference(ctx.map_property_reference(&popup.y)?);
+        let item_ref = lower_expression(
+            &tree_Expression::ElementReference(Rc::downgrade(&popup.parent_element)),
+            ctx,
+        )?;
+        Some(llr_Expression::BuiltinFunctionCall {
+            function: BuiltinFunction::ShowPopupWindow,
+            arguments: vec![llr_Expression::NumberLiteral(popup_index as _), x, y, item_ref],
+        })
+    } else {
+        panic!("invalid arguments to ShowPopupWindow");
+    }
 }
 
 pub fn lower_animation(a: &PropertyAnimation, ctx: &ExpressionContext<'_>) -> Option<Animation> {

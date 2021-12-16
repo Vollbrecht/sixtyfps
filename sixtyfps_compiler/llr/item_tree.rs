@@ -97,6 +97,7 @@ pub struct SubComponent {
     pub properties: Vec<Property>,
     pub items: Vec<Item>,
     pub repeated: Vec<RepeatedElement>,
+    pub popup_windows: Vec<ItemTree>,
     pub sub_components: Vec<SubComponentInstance>,
     pub property_init: Vec<(PropertyReference, BindingExpression)>,
     pub two_way_bindings: Vec<(PropertyReference, PropertyReference)>,
