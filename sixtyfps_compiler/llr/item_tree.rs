@@ -8,13 +8,11 @@
     Please contact info@sixtyfps.io for more information.
 LICENSE END */
 
-use std::collections::HashMap;
+use super::Expression;
+use crate::langtype::{NativeClass, Type};
+use std::collections::BTreeMap;
 use std::num::NonZeroUsize;
 use std::rc::Rc;
-
-use crate::langtype::Type;
-
-use super::Expression;
 
 // Index in the `SubComponent::properties`
 pub type PropertyIndex = usize;
@@ -37,6 +35,7 @@ pub struct GlobalComponent {
     pub name: String,
     pub properties: Vec<Property>,
     pub init_values: Vec<Option<Expression>>,
+    pub const_properties: Vec<bool>,
 }
 
 /// a Reference to a property, in the context of a SubComponent
@@ -70,17 +69,13 @@ pub struct RepeatedElement {
 }
 
 #[derive(Debug)]
-pub struct ItemType {
-    // cpp_name: String,
-// rust_name: String,
-// cpp_init_function: String,
-// mouse_function: String,
-// extra_data_type: String,
-}
-
-#[derive(Debug)]
 pub struct Item {
-    pub ty: Rc<ItemType>,
+    pub ty: Rc<NativeClass>,
+    pub name: String,
+    /// When this is true, this item does not need to be created because it is
+    /// already in the flickable.
+    /// The Item::name is the same as the flickable, and ty is Rectangle
+    pub is_flickable_viewport: bool,
 }
 
 #[derive(Debug)]
@@ -101,10 +96,12 @@ pub struct SubComponent {
     pub sub_components: Vec<SubComponentInstance>,
     pub property_init: Vec<(PropertyReference, BindingExpression)>,
     pub two_way_bindings: Vec<(PropertyReference, PropertyReference)>,
+    pub const_properties: Vec<PropertyReference>,
 }
 
 pub struct SubComponentInstance {
     pub ty: Rc<SubComponent>,
+    pub name: String,
     //pub property_values: Vec<(PropertyReference, BindingExpression)>,
 }
 
@@ -126,7 +123,8 @@ pub struct ItemTree {
 
 #[derive(Debug)]
 pub struct PublicComponent {
+    pub public_properties: BTreeMap<String, (Type, PropertyReference)>,
     pub item_tree: ItemTree,
-    pub sub_components: HashMap<String, Rc<SubComponent>>,
+    pub sub_components: BTreeMap<String, Rc<SubComponent>>,
     pub globals: Vec<GlobalComponent>,
 }

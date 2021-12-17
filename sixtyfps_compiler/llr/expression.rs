@@ -87,12 +87,16 @@ pub enum Expression {
         arguments: Vec<Expression>,
     },
 
-    /// A SelfAssignment or an Assignment.  When op is '=' this is a signal assignment.
-    SelfAssignment {
-        lhs: Box<Expression>,
-        rhs: Box<Expression>,
-        /// '+', '-', '/', '*', or '='
-        op: char,
+    /// An assignment of a value to a property
+    PropertyAssignment {
+        property: PropertyReference,
+        value: Box<Expression>,
+    },
+    /// an assignment of a value to the model data
+    ModelDataAssignment {
+        // how deep in the parent hierarchy we go
+        level: usize,
+        value: Box<Expression>,
     },
 
     BinaryExpression {
@@ -232,7 +236,8 @@ impl Expression {
             },
             Self::CallBackCall { .. } => todo!(),
             Self::ExtraBuiltinFunctionCall { .. } => todo!(),
-            Self::SelfAssignment { .. } => Type::Void,
+            Self::PropertyAssignment { .. } => Type::Void,
+            Self::ModelDataAssignment { .. } => Type::Void,
             Self::BinaryExpression { lhs, rhs: _, op } => {
                 if crate::expression_tree::operator_class(*op) != OperatorClass::ArithmeticOp {
                     Type::Bool

@@ -63,7 +63,9 @@ pub fn lower_expression(
         tree_Expression::Invalid => None,
         tree_Expression::Uncompiled(_) => panic!(),
         tree_Expression::StringLiteral(s) => Some(llr_Expression::StringLiteral(s.clone())),
-        tree_Expression::NumberLiteral(n, _) => Some(llr_Expression::NumberLiteral(*n)),
+        tree_Expression::NumberLiteral(n, unit) => {
+            Some(llr_Expression::NumberLiteral(unit.normalize(*n)))
+        }
         tree_Expression::BoolLiteral(b) => Some(llr_Expression::BoolLiteral(*b)),
         tree_Expression::CallbackReference(nr) => {
             Some(llr_Expression::PropertyReference(ctx.map_property_reference(nr)?))
@@ -137,11 +139,7 @@ pub fn lower_expression(
             }
             _ => panic!("not calling a function"),
         },
-        tree_Expression::SelfAssignment { lhs, rhs, op } => Some(llr_Expression::SelfAssignment {
-            lhs: Box::new(lower_expression(lhs, ctx)?),
-            rhs: Box::new(lower_expression(rhs, ctx)?),
-            op: *op,
-        }),
+        tree_Expression::SelfAssignment { lhs, rhs, op } => lower_assignment(lhs, rhs, *op, ctx),
         tree_Expression::BinaryExpression { lhs, rhs, op } => {
             Some(llr_Expression::BinaryExpression {
                 lhs: Box::new(lower_expression(lhs, ctx)?),
@@ -200,6 +198,96 @@ pub fn lower_expression(
         }
         tree_Expression::ComputeLayoutInfo(l, o) => compute_layout_info(l, *o, ctx),
         tree_Expression::SolveLayout(l, o) => solve_layout(l, *o, ctx),
+    }
+}
+
+fn lower_assignment(
+    lhs: &tree_Expression,
+    rhs: &tree_Expression,
+    op: char,
+    ctx: &ExpressionContext,
+) -> Option<llr_Expression> {
+    match lhs {
+        tree_Expression::PropertyReference(nr) => {
+            let rhs = lower_expression(rhs, ctx)?;
+            let property = ctx.map_property_reference(nr)?;
+            let value = if op == '=' {
+                rhs
+            } else {
+                llr_Expression::BinaryExpression {
+                    lhs: llr_Expression::PropertyReference(property.clone()).into(),
+                    rhs: rhs.into(),
+                    op,
+                }
+            }
+            .into();
+            Some(llr_Expression::PropertyAssignment { property, value })
+        }
+        tree_Expression::StructFieldAccess { base, name } => {
+            let ty = base.ty();
+
+            static COUNT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+            let unique_name = format!(
+                "struct_assignment{}",
+                COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            );
+            let s = tree_Expression::StoreLocalVariable {
+                name: unique_name.clone(),
+                value: base.clone(),
+            };
+            let lower_base =
+                tree_Expression::ReadLocalVariable { name: unique_name, ty: ty.clone() };
+            let mut values = HashMap::new();
+            match &ty {
+                Type::Struct { fields, .. } => {
+                    for (field, _) in fields {
+                        let e = if field != name {
+                            tree_Expression::StructFieldAccess {
+                                base: lower_base.clone().into(),
+                                name: field.clone(),
+                            }
+                        } else if op == '=' {
+                            rhs.clone()
+                        } else {
+                            tree_Expression::BinaryExpression {
+                                lhs: tree_Expression::StructFieldAccess {
+                                    base: lower_base.clone().into(),
+                                    name: field.clone(),
+                                }
+                                .into(),
+                                rhs: Box::new(rhs.clone()),
+                                op,
+                            }
+                        };
+                        values.insert(field.clone(), e);
+                    }
+                }
+                _ => unreachable!(),
+            }
+            let new_value =
+                tree_Expression::CodeBlock(vec![s, tree_Expression::Struct { ty, values }]);
+            lower_assignment(base, &new_value, '=', ctx)
+        }
+        tree_Expression::RepeaterModelReference { element } => {
+            let rhs = lower_expression(rhs, ctx)?;
+            let prop = repeater_special_property(element, ctx.component, 0)?;
+
+            let level = match &prop {
+                llr_Expression::PropertyReference(PropertyReference::InParent {
+                    level, ..
+                }) => (*level).into(),
+                _ => 0,
+            };
+
+            let value = Box::new(if op == '=' {
+                rhs
+            } else {
+                llr_Expression::BinaryExpression { lhs: prop.into(), rhs: rhs.into(), op }
+            });
+
+            Some(llr_Expression::ModelDataAssignment { level, value })
+        }
+        _ => panic!("not a rvalue"),
     }
 }
 
