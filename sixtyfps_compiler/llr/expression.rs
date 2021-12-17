@@ -11,6 +11,7 @@ LICENSE END */
 use super::PropertyReference;
 use crate::expression_tree::{BuiltinFunction, OperatorClass};
 use crate::langtype::Type;
+use crate::layout::Orientation;
 use itertools::Either;
 use std::collections::HashMap;
 
@@ -159,6 +160,7 @@ pub enum Expression {
         /// The name for the local variable that stores the repeater indices
         /// In other word, this expression has side effect and change that
         repeater_indices: Option<String>,
+        orientation: Orientation,
     },
 }
 

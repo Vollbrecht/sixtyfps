@@ -665,6 +665,7 @@ fn box_layout_data(
                     *ri = "repeater_indices".into();
                     (*ri).clone()
                 }),
+                orientation,
             },
             alignment,
         ))
