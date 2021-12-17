@@ -18,14 +18,17 @@ Some convention used in the generated code:
 
 use crate::diagnostics::{BuildDiagnostics, Spanned};
 use crate::expression_tree::{
-    BindingExpression, BuiltinFunction, EasingCurve, Expression, NamedReference, OperatorClass,
-    Path,
+    BindingExpression, BuiltinFunction, EasingCurve, NamedReference, OperatorClass, Path,
 };
 use crate::langtype::Type;
 use crate::layout::{Layout, LayoutGeometry, LayoutRect, Orientation};
+use crate::llr::{self, Expression};
 use crate::object_tree::{Component, Document, ElementRc};
+use itertools::Either;
 use proc_macro2::{Ident, TokenStream};
 use quote::{format_ident, quote};
+use std::num::NonZeroUsize;
+use std::ptr::NonNull;
 use std::{collections::BTreeMap, rc::Rc};
 
 fn ident(ident: &str) -> proc_macro2::Ident {
@@ -90,18 +93,7 @@ fn rust_type(ty: &Type) -> Option<proc_macro2::TokenStream> {
         _ => None,
     }
 }
-
-fn get_rust_type(
-    ty: &Type,
-    type_node: &dyn crate::diagnostics::Spanned,
-    diag: &mut BuildDiagnostics,
-) -> proc_macro2::TokenStream {
-    rust_type(ty).unwrap_or_else(|| {
-        diag.push_error(format!("Cannot map property type {} to Rust", ty), type_node);
-        quote!(_)
-    })
-}
-
+/*
 /// Generate the rust code for the given component.
 ///
 /// Fill the diagnostic in case of error.
@@ -126,10 +118,13 @@ pub fn generate(doc: &Document, diag: &mut BuildDiagnostics) -> Option<TokenStre
         })
         .unzip();
 
-    let mut sub_compos = Vec::new();
-    for sub_comp in doc.root_component.used_types.borrow().sub_components.iter() {
-        sub_compos.push(generate_component(&sub_comp, &doc.root_component, diag)?);
-    }
+    let llr = crate::llr::lower_to_item_tree::lower_to_item_tree(&doc.root_component);
+
+    let mut sub_compos = llr
+        .sub_components
+        .values()
+        .map(|sub_compo| generate_component(&sub_comp, false, diag))
+        .collect::<Option<Vec<_>>>()?;
 
     let compo = generate_component(&doc.root_component, &doc.root_component, diag)?;
     let compo_id = public_component_id(&doc.root_component);
@@ -189,12 +184,8 @@ fn generate_struct(
     diag: &mut BuildDiagnostics,
 ) -> TokenStream {
     let component_id = struct_name_to_tokens(name);
-    let (declared_property_vars, declared_property_types): (Vec<_>, Vec<_>) = fields
-        .iter()
-        .map(|(name, ty)| {
-            (ident(name), get_rust_type(ty, &crate::diagnostics::SourceLocation::default(), diag))
-        })
-        .unzip();
+    let (declared_property_vars, declared_property_types): (Vec<_>, Vec<_>) =
+        fields.iter().map(|(name, ty)| (ident(name), rust_type(ty).unwrap())).unzip();
 
     quote! {
         #[derive(Default, PartialEq, Debug, Clone)]
@@ -325,147 +316,189 @@ fn handle_property_binding(
     }
 }
 
+fn generate_global(global: llr::GlobalComponent) -> Option<TokenStream> {
+    let self_init = quote!(let _self = self.0.as_ref(););
+}
+
+fn public_api(c: &llr::PublicComponent) {
+    let self_init = if !is_global {
+        quote!(let _self = vtable::VRc::as_pin_ref(&self.0);)
+    } else {
+        quote!(let _self = self.0.as_ref();)
+    };
+    let mut property_and_callback_accessors: Vec<TokenStream> = vec![];
+
+    for (p, (ty, r)) in &c.public_properties {
+        let prop_ident = ident(&p);
+
+        if let Type::Callback { args, return_type } = ty {
+            let callback_args = args.iter().map(|a| rust_type(a).unwrap()).collect::<Vec<_>>();
+            let return_type = return_type.as_ref().map_or(quote!(()), |a| get_type(a).unwrap());
+            let args_name = (0..args.len()).map(|i| format_ident!("arg_{}", i)).collect::<Vec<_>>();
+            let caller_ident = format_ident!("invoke_{}", prop_ident);
+            property_and_callback_accessors.push(quote!(
+                #[allow(dead_code)]
+                pub fn #caller_ident(&self, #(#args_name : #callback_args,)*) -> #return_type {
+                    #self_init
+                    #prop.call(&(#(#args_name,)*))
+                }
+            ));
+            let on_ident = format_ident!("on_{}", prop_ident);
+            let args_index = (0..callback_args.len()).map(proc_macro2::Literal::usize_unsuffixed);
+            property_and_callback_accessors.push(quote!(
+                #[allow(dead_code)]
+                pub fn #on_ident(&self, f: impl Fn(#(#callback_args),*) -> #return_type + 'static) {
+                    #self_init
+                    #[allow(unused)]
+                    #prop.set_handler(
+                        // FIXME: why do i need to clone here?
+                        move |args| f(#(args.#args_index.clone()),*)
+                    )
+                }
+            ));
+        } else {
+            let rust_property_type = rust_type(ty).unwrap();
+
+            let getter_ident = format_ident!("get_{}", prop_ident);
+            let setter_ident = format_ident!("set_{}", prop_ident);
+
+            property_and_callback_accessors.push(quote!(
+                #[allow(dead_code)]
+                pub fn #getter_ident(&self) -> #rust_property_type {
+                    #[allow(unused_imports)]
+                    use sixtyfps::re_exports::*;
+                    #self_init
+                    #prop.get()
+                }
+            ));
+
+            let set_value = if let Some(alias) = &property_decl.is_alias {
+                property_set_value_tokens(component, &alias.element(), alias.name(), quote!(value))
+            } else {
+                property_set_value_tokens(
+                    component,
+                    &component.root_element,
+                    prop_name,
+                    quote!(value),
+                )
+            };
+            property_and_callback_accessors.push(quote!(
+                #[allow(dead_code)]
+                pub fn #setter_ident(&self, value: #rust_property_type) {
+                    #[allow(unused_imports)]
+                    use sixtyfps::re_exports::*;
+                    #self_init
+                    #prop.#set_value
+                }
+            ));
+        }
+    }
+}
+
 /// Generate the rust code for the given component.
 ///
 /// Fill the diagnostic in case of error.
-fn generate_component(
-    component: &Rc<Component>,
-    root_component: &Rc<Component>,
+fn generate_sub_component(
+    component: &llr::SubComponent,
     diag: &mut BuildDiagnostics,
 ) -> Option<TokenStream> {
     let inner_component_id = inner_component_id(component);
 
     let mut extra_components = component
         .popup_windows
-        .borrow()
         .iter()
-        .filter_map(|c| generate_component(&c.component, &root_component, diag))
+        .filter_map(|c| generate_component(&c.component, false, diag))
         .collect::<Vec<_>>();
 
-    let self_init = if !component.is_global() {
-        quote!(let _self = vtable::VRc::as_pin_ref(&self.0);)
-    } else {
-        quote!(let _self = self.0.as_ref();)
-    };
+    let self_init = quote!(let _self = vtable::VRc::as_pin_ref(&self.0););
 
     let mut declared_property_vars = vec![];
     let mut declared_property_types = vec![];
     let mut declared_callbacks = vec![];
     let mut declared_callbacks_types = vec![];
     let mut declared_callbacks_ret = vec![];
-    let mut property_and_callback_accessors: Vec<TokenStream> = vec![];
-    for (prop_name, property_decl) in component.root_element.borrow().property_declarations.iter() {
-        let prop_ident = ident(prop_name);
 
-        let make_prop_getter = |self_accessor| {
-            if let Some(alias) = &property_decl.is_alias {
-                access_named_reference(alias, component, self_accessor)
-            } else {
-                let field = access_component_field_offset(&inner_component_id, &prop_ident);
-                quote!(#field.apply_pin(#self_accessor))
-            }
-        };
-
-        let prop = make_prop_getter(quote!(_self));
-
-        if let Type::Callback { args, return_type } = &property_decl.property_type {
-            let callback_args = args
-                .iter()
-                .map(|a| get_rust_type(a, &property_decl.type_node(), diag))
-                .collect::<Vec<_>>();
-            let return_type = return_type
-                .as_ref()
-                .map_or(quote!(()), |a| get_rust_type(a, &property_decl.type_node(), diag));
-
-            if property_decl.expose_in_public_api {
-                let args_name = (0..callback_args.len())
-                    .map(|i| format_ident!("arg_{}", i))
-                    .collect::<Vec<_>>();
-                let caller_ident = format_ident!("invoke_{}", prop_ident);
-                property_and_callback_accessors.push(quote!(
-                    #[allow(dead_code)]
-                    pub fn #caller_ident(&self, #(#args_name : #callback_args,)*) -> #return_type {
-                        #self_init
-                        #prop.call(&(#(#args_name,)*))
-                    }
-                ));
-
-                let on_ident = format_ident!("on_{}", prop_ident);
-                let args_index =
-                    (0..callback_args.len()).map(proc_macro2::Literal::usize_unsuffixed);
-                property_and_callback_accessors.push(
-                    quote!(
-                        #[allow(dead_code)]
-                        pub fn #on_ident(&self, f: impl Fn(#(#callback_args),*) -> #return_type + 'static) {
-                            #self_init
-                            #[allow(unused)]
-                            #prop.set_handler(
-                                // FIXME: why do i need to clone here?
-                                move |args| f(#(args.#args_index.clone()),*)
-                            )
-                        }
-                    )
-                    ,
-                );
-            }
-
-            if property_decl.is_alias.is_none() {
-                declared_callbacks.push(prop_ident.clone());
-                declared_callbacks_types.push(callback_args);
-                declared_callbacks_ret.push(return_type);
-            }
+    for property in &component.properties {
+        let prop_ident = ident(&property.name);
+        if let Type::Callback { args, return_type } = &property.ty {
+            let callback_args = args.iter().map(|a| rust_type(a).unwrap()).collect::<Vec<_>>();
+            let return_type = return_type.as_ref().map_or(quote!(()), |a| rust_type(a).unwrap());
+            declared_callbacks.push(prop_ident.clone());
+            declared_callbacks_types.push(callback_args);
+            declared_callbacks_ret.push(return_type);
         } else {
-            let rust_property_type =
-                get_rust_type(&property_decl.property_type, &property_decl.type_node(), diag);
-            if property_decl.expose_in_public_api {
-                let getter_ident = format_ident!("get_{}", prop_ident);
-                let setter_ident = format_ident!("set_{}", prop_ident);
-
-                property_and_callback_accessors.push(quote!(
-                    #[allow(dead_code)]
-                    pub fn #getter_ident(&self) -> #rust_property_type {
-                        #[allow(unused_imports)]
-                        use sixtyfps::re_exports::*;
-                        #self_init
-                        #prop.get()
-                    }
-                ));
-
-                let set_value = if let Some(alias) = &property_decl.is_alias {
-                    property_set_value_tokens(
-                        component,
-                        &alias.element(),
-                        alias.name(),
-                        quote!(value),
-                    )
-                } else {
-                    property_set_value_tokens(
-                        component,
-                        &component.root_element,
-                        prop_name,
-                        quote!(value),
-                    )
-                };
-                property_and_callback_accessors.push(quote!(
-                    #[allow(dead_code)]
-                    pub fn #setter_ident(&self, value: #rust_property_type) {
-                        #[allow(unused_imports)]
-                        use sixtyfps::re_exports::*;
-                        #self_init
-                        #prop.#set_value
-                    }
-                ));
-            }
-
-            if property_decl.is_alias.is_none() {
-                declared_property_vars.push(prop_ident.clone());
-                declared_property_types.push(rust_property_type.clone());
-            }
+            let rust_property_type = rust_type(&property.ty).unwrap();
+            declared_property_vars.push(prop_ident.clone());
+            declared_property_types.push(rust_property_type.clone());
         }
     }
 
-    if diag.has_error() {
-        return None;
+    for (idx, repeated) in component.repeated.iter().enumerate() {
+        extra_components.push(generate_repeated_component(&repeated.sub_tree));
+        let repeater_id = format_ident!("repeater{}", idx);
+
+        let mut model = compile_expression(&repeated.model, &parent_compo);
+        if repeated.is_conditional_element {
+            model = quote!(sixtyfps::re_exports::ModelHandle::new(sixtyfps::re_exports::Rc::<bool>::new(#model)))
+        }
+
+        let self_weak_downgrade = if self.generating_component.is_sub_component() {
+            quote!(sixtyfps::re_exports::VRcMapped::downgrade(&self_rc))
+        } else {
+            quote!(sixtyfps::re_exports::VRc::downgrade(&self_rc))
+        };
+
+        self.init.push(quote! {
+            _self.#repeater_id.set_model_binding({
+                let self_weak = #self_weak_downgrade;
+                move || {
+                    let self_rc = self_weak.upgrade().unwrap();
+                    let _self = self_rc.as_pin_ref();
+                    (#model) as _
+                }
+            });
+        });
+        let window_tokens = access_window_field(&parent_compo, quote!(_self));
+        if let Some(listview) = &repeated.is_listview {
+            let vp_y = access_named_reference(&listview.viewport_y, &parent_compo, quote!(_self));
+            let vp_h =
+                access_named_reference(&listview.viewport_height, &parent_compo, quote!(_self));
+            let lv_h =
+                access_named_reference(&listview.listview_height, &parent_compo, quote!(_self));
+            let vp_w =
+                access_named_reference(&listview.viewport_width, &parent_compo, quote!(_self));
+            let lv_w =
+                access_named_reference(&listview.listview_width, &parent_compo, quote!(_self));
+
+            let ensure_updated = quote! {
+                #inner_component_id::FIELD_OFFSETS.#repeater_id.apply_pin(_self).ensure_updated_listview(
+                    || { #rep_inner_component_id::new(_self.self_weak.get().unwrap().clone(), &#window_tokens.window_handle()).into() },
+                    #vp_w, #vp_h, #vp_y, #lv_w.get(), #lv_h
+                );
+            };
+
+            self.repeated_visit_branch.push(quote!(
+                #repeater_index => {
+                    #ensure_updated
+                    _self.#repeater_id.visit(order, visitor)
+                }
+            ));
+        } else {
+            let ensure_updated = quote! {
+                #inner_component_id::FIELD_OFFSETS.#repeater_id.apply_pin(_self).ensure_updated(
+                    || { #rep_inner_component_id::new(_self.self_weak.get().unwrap().clone(), &#window_tokens.window_handle()).into() }
+                );
+            };
+
+            self.repeated_visit_branch.push(quote!(
+                #repeater_index => {
+                    #ensure_updated
+                    _self.#repeater_id.visit(order, visitor)
+                }
+            ));
+        }
+        self.repeated_element_names.push(repeater_id);
+        self.repeated_element_components.push(rep_inner_component_id);
     }
 
     struct TreeBuilder<'a> {
@@ -497,19 +530,7 @@ fn generate_component(
             component_state: &Self::SubComponentState,
         ) {
             let repeater_index = repeater_index as usize;
-            if component_state.is_empty() {
-                let item = item_rc.borrow();
-                let base_component = item.base_type.as_component();
-                self.extra_components.push(
-                    generate_component(&*base_component, &self.root_component, self.diag)
-                        .unwrap_or_else(|| {
-                            assert!(self.diag.has_error());
-                            Default::default()
-                        }),
-                );
-                let repeated = item.repeated.as_ref().unwrap();
-                self.handle_repeater(repeated, base_component, repeater_index);
-            }
+            if component_state.is_empty() {}
             self.tree_array.push(quote!(
                 sixtyfps::re_exports::ItemTreeNode::DynamicTree {
                     index: #repeater_index,
@@ -636,152 +657,6 @@ fn generate_component(
                     ));
                 }
             }
-        }
-    }
-
-    impl<'a> TreeBuilder<'a> {
-        fn handle_repeater(
-            &mut self,
-            repeated: &crate::object_tree::RepeatedElementInfo,
-            base_component: &Rc<Component>,
-            repeater_index: usize,
-        ) {
-            let parent_element = base_component.parent_element.upgrade().unwrap();
-            let repeater_id = format_ident!("repeater_{}", ident(&parent_element.borrow().id));
-            let rep_inner_component_id = self::inner_component_id(&*base_component);
-            let parent_compo = parent_element.borrow().enclosing_component.upgrade().unwrap();
-            let inner_component_id = self::inner_component_id(&parent_compo);
-
-            let extra_fn = if repeated.is_listview.is_some() {
-                let am = |prop| {
-                    access_member(
-                        &base_component.root_element,
-                        prop,
-                        base_component,
-                        quote!(self),
-                        false,
-                    )
-                };
-                let p_y = am("y");
-                let p_height = am("height");
-                let p_width = am("width");
-                quote! {
-                    fn listview_layout(
-                        self: core::pin::Pin<&Self>,
-                        offset_y: &mut f32,
-                        viewport_width: core::pin::Pin<&sixtyfps::re_exports::Property<f32>>,
-                    ) {
-                        use sixtyfps::re_exports::*;
-                        let vp_w = viewport_width.get();
-                        #p_y.set(*offset_y);
-                        *offset_y += #p_height.get();
-                        let w = #p_width.get();
-                        if vp_w < w {
-                            viewport_width.set(w);
-                        }
-                    }
-                }
-            } else {
-                // TODO: we could generate this code only if we know that this component is in a box layout
-                quote! {
-                    fn box_layout_data(self: ::core::pin::Pin<&Self>, o: sixtyfps::re_exports::Orientation)
-                        -> sixtyfps::re_exports::BoxLayoutCellData
-                    {
-                        use sixtyfps::re_exports::*;
-                        BoxLayoutCellData { constraint: self.as_ref().layout_info(o) }
-                    }
-                }
-            };
-            self.extra_components.push(if repeated.is_conditional_element {
-                quote! {
-                    impl sixtyfps::re_exports::RepeatedComponent for #rep_inner_component_id {
-                        type Data = ();
-                        fn update(&self, _: usize, _: Self::Data) { }
-                        #extra_fn
-                    }
-                }
-            } else {
-                let data_type = get_rust_type(
-                    &Expression::RepeaterModelReference { element: Rc::downgrade(&parent_element) }
-                        .ty(),
-                    &parent_element.borrow().node.as_ref().map(|x| x.to_source_location()),
-                    self.diag,
-                );
-
-                quote! {
-                    impl sixtyfps::re_exports::RepeatedComponent for #rep_inner_component_id {
-                        type Data = #data_type;
-                        fn update(&self, index: usize, data: Self::Data) {
-                            self.index.set(index);
-                            self.model_data.set(data);
-                        }
-                        #extra_fn
-                    }
-                }
-            });
-            let mut model = compile_expression(&repeated.model, &parent_compo);
-            if repeated.is_conditional_element {
-                model = quote!(sixtyfps::re_exports::ModelHandle::new(sixtyfps::re_exports::Rc::<bool>::new(#model)))
-            }
-
-            let self_weak_downgrade = if self.generating_component.is_sub_component() {
-                quote!(sixtyfps::re_exports::VRcMapped::downgrade(&self_rc))
-            } else {
-                quote!(sixtyfps::re_exports::VRc::downgrade(&self_rc))
-            };
-
-            self.init.push(quote! {
-                _self.#repeater_id.set_model_binding({
-                    let self_weak = #self_weak_downgrade;
-                    move || {
-                        let self_rc = self_weak.upgrade().unwrap();
-                        let _self = self_rc.as_pin_ref();
-                        (#model) as _
-                    }
-                });
-            });
-            let window_tokens = access_window_field(&parent_compo, quote!(_self));
-            if let Some(listview) = &repeated.is_listview {
-                let vp_y =
-                    access_named_reference(&listview.viewport_y, &parent_compo, quote!(_self));
-                let vp_h =
-                    access_named_reference(&listview.viewport_height, &parent_compo, quote!(_self));
-                let lv_h =
-                    access_named_reference(&listview.listview_height, &parent_compo, quote!(_self));
-                let vp_w =
-                    access_named_reference(&listview.viewport_width, &parent_compo, quote!(_self));
-                let lv_w =
-                    access_named_reference(&listview.listview_width, &parent_compo, quote!(_self));
-
-                let ensure_updated = quote! {
-                    #inner_component_id::FIELD_OFFSETS.#repeater_id.apply_pin(_self).ensure_updated_listview(
-                        || { #rep_inner_component_id::new(_self.self_weak.get().unwrap().clone(), &#window_tokens.window_handle()).into() },
-                        #vp_w, #vp_h, #vp_y, #lv_w.get(), #lv_h
-                    );
-                };
-
-                self.repeated_visit_branch.push(quote!(
-                    #repeater_index => {
-                        #ensure_updated
-                        _self.#repeater_id.visit(order, visitor)
-                    }
-                ));
-            } else {
-                let ensure_updated = quote! {
-                    #inner_component_id::FIELD_OFFSETS.#repeater_id.apply_pin(_self).ensure_updated(
-                        || { #rep_inner_component_id::new(_self.self_weak.get().unwrap().clone(), &#window_tokens.window_handle()).into() }
-                    );
-                };
-
-                self.repeated_visit_branch.push(quote!(
-                    #repeater_index => {
-                        #ensure_updated
-                        _self.#repeater_id.visit(order, visitor)
-                    }
-                ));
-            }
-            self.repeated_element_names.push(repeater_id);
-            self.repeated_element_components.push(rep_inner_component_id);
         }
     }
 
@@ -1343,6 +1218,83 @@ fn generate_component(
     ))
 }
 
+fn generate_repeated_component(sub_tree: &llr::ItemTree) -> TokenStream {
+    todo!()
+    /*
+    // let rep_inner_component_id = self::inner_component_id(&repeated.sub_tree.root.name);
+        //  let inner_component_id = self::inner_component_id(&parent_compo);
+
+        /*let extra_fn = if repeated.is_listview.is_some() {
+            let am = |prop| {
+                access_member(
+                    &base_component.root_element,
+                    prop,
+                    base_component,
+                    quote!(self),
+                    false,
+                )
+            };
+            let p_y = am("y");
+            let p_height = am("height");
+            let p_width = am("width");
+            quote! {
+                fn listview_layout(
+                    self: core::pin::Pin<&Self>,
+                    offset_y: &mut f32,
+                    viewport_width: core::pin::Pin<&sixtyfps::re_exports::Property<f32>>,
+                ) {
+                    use sixtyfps::re_exports::*;
+                    let vp_w = viewport_width.get();
+                    #p_y.set(*offset_y);
+                    *offset_y += #p_height.get();
+                    let w = #p_width.get();
+                    if vp_w < w {
+                        viewport_width.set(w);
+                    }
+                }
+            }
+        } else {
+            // TODO: we could generate this code only if we know that this component is in a box layout
+            quote! {
+                fn box_layout_data(self: ::core::pin::Pin<&Self>, o: sixtyfps::re_exports::Orientation)
+                    -> sixtyfps::re_exports::BoxLayoutCellData
+                {
+                    use sixtyfps::re_exports::*;
+                    BoxLayoutCellData { constraint: self.as_ref().layout_info(o) }
+                }
+            }
+        };*/
+
+        extra_components.push(if repeated.is_conditional_element {
+            quote! {
+                impl sixtyfps::re_exports::RepeatedComponent for #rep_inner_component_id {
+                    type Data = ();
+                    fn update(&self, _: usize, _: Self::Data) { }
+                    #extra_fn
+                }
+            }
+        } else {
+            let data_type = get_rust_type(
+                &Expression::RepeaterModelReference { element: Rc::downgrade(&parent_element) }
+                    .ty(),
+                &parent_element.borrow().node.as_ref().map(|x| x.to_source_location()),
+                self.diag,
+            );
+
+            quote! {
+                impl sixtyfps::re_exports::RepeatedComponent for #rep_inner_component_id {
+                    type Data = #data_type;
+                    fn update(&self, index: usize, data: Self::Data) {
+                        self.index.set(index);
+                        self.model_data.set(data);
+                    }
+                    #extra_fn
+                }
+            }
+        });
+        */
+}
+
 /// Retruns the tokens needed to access the root component (where global singletons are located).
 /// This is needed for the `init()` calls on sub-components, that take the root as a parameter.
 fn access_root_tokens(component: &Rc<Component>) -> TokenStream {
@@ -1365,18 +1317,12 @@ fn access_root_tokens(component: &Rc<Component>) -> TokenStream {
         break tokens;
     }
 }
-
+*/
 /// Return an identifier suitable for this component for internal use
-fn inner_component_id(component: &Component) -> proc_macro2::Ident {
-    if component.is_global()
-        && matches!(&component.root_element.borrow().base_type, Type::Builtin(_))
-    {
-        public_component_id(component)
-    } else {
-        format_ident!("Inner{}", public_component_id(component))
-    }
+fn inner_component_id(component: &llr::SubComponent) -> proc_macro2::Ident {
+    format_ident!("Inner{}", ident(&component.name))
 }
-
+/*
 /// Return an identifier suitable for this component for the developer facing API
 fn public_component_id(component: &Component) -> proc_macro2::Ident {
     if component.is_global() {
@@ -1410,23 +1356,24 @@ fn property_animation_tokens(
         #(#bindings, )*
         ..::core::default::Default::default()
     }))
-}
+}*/
 
 fn property_set_value_tokens(
-    component: &Rc<Component>,
-    element: &ElementRc,
-    property_name: &str,
+    property: &llr::PropertyReference,
     value_tokens: TokenStream,
+    ctx: &EvaluationContext,
 ) -> TokenStream {
-    if let Some(binding) = element.borrow().bindings.get(property_name) {
+    // FIXME! animation
+    /*if let Some(binding) = element.borrow().bindings.get(property_name) {
         if let Some(crate::object_tree::PropertyAnimation::Static(animation)) =
-            binding.borrow().animation.as_ref()
+        binding.borrow().animation.as_ref()
         {
             let animation_tokens = property_animation_tokens(component, animation);
             return quote!(set_animated_value(#value_tokens, #animation_tokens));
         }
-    }
-    quote!(set(#value_tokens))
+    }*/
+    let prop = access_member(property, ctx);
+    quote!(#prop.set(#value_tokens))
 }
 
 /// Returns the code that can access the given property or callback (but without the set or get)
@@ -1436,97 +1383,71 @@ fn property_set_value_tokens(
 /// let access = access_member(...)
 /// quote!(#access.get())
 /// ```
-fn access_member(
-    element: &ElementRc,
-    name: &str,
-    component: &Rc<Component>,
-    component_rust: TokenStream,
-    is_special: bool,
-) -> TokenStream {
-    let e = element.borrow();
-
-    let enclosing_component = e.enclosing_component.upgrade().unwrap();
-    if Rc::ptr_eq(component, &enclosing_component) {
-        let inner_component_id = inner_component_id(&enclosing_component);
-        let name_ident = ident(name);
-        if e.property_declarations.contains_key(name) || is_special || component.is_global() {
-            let field = access_component_field_offset(&inner_component_id, &name_ident);
-            quote!(#field.apply_pin(#component_rust))
-        } else if e.is_flickable_viewport {
-            let elem_ident =
-                ident(&crate::object_tree::find_parent_element(element).unwrap().borrow().id);
-            let element_field = access_component_field_offset(&inner_component_id, &elem_ident);
-
-            quote!((#element_field
-                + sixtyfps::re_exports::Flickable::FIELD_OFFSETS.viewport
-                + sixtyfps::re_exports::Rectangle::FIELD_OFFSETS.#name_ident)
-                    .apply_pin(#component_rust)
-            )
-        } else if let Some(sub_component) = e.sub_component() {
-            let subcomp_ident = ident(&e.id);
-            let subcomp_field = access_component_field_offset(&inner_component_id, &subcomp_ident);
-            let subcomp = quote!(#subcomp_field.apply_pin(#component_rust));
-            if let Some(alias) = sub_component
-                .root_element
-                .borrow()
-                .property_declarations
-                .get(name)
-                .and_then(|d| d.is_alias.as_ref())
-            {
-                access_named_reference(alias, sub_component, subcomp)
+fn access_member(reference: &llr::PropertyReference, ctx: &EvaluationContext) -> TokenStream {
+    match reference {
+        llr::PropertyReference::Local { sub_component_path, property_index } => {
+            if let Some(mut sub_component) = ctx.current_sub_component {
+                let mut compo_path = quote!();
+                for i in sub_component_path {
+                    let component_id = inner_component_id(sub_component);
+                    let sub_component_name = ident(&sub_component.sub_components[*i].name);
+                    compo_path =
+                        quote!(#compo_path #component_id::FIELD_OFFSETS.#sub_component_name +);
+                    sub_component = &sub_component.sub_components[*i].ty;
+                }
+                let component_id = inner_component_id(sub_component);
+                let property_name = ident(&sub_component.properties[*property_index].name);
+                quote!((compo_path #component_id::FIELD_OFFSETS.#property_name).apply_pin(_self))
+            } else if let Some(current_global) = ctx.current_global {
+                let global_name = ident(&current_global.name);
+                let property_name = ident(&current_global.properties[*property_index].name);
+                quote!(#global_name::FIELD_OFFSETS.#property_name.apply_pin(_self))
             } else {
-                access_member(&sub_component.root_element, name, sub_component, subcomp, is_special)
+                unreachable!()
             }
-        } else {
-            let elem_ident = ident(&e.id);
-            let elem_ty = ident(&e.base_type.as_native().class_name);
-            let element_field = access_component_field_offset(&inner_component_id, &elem_ident);
-
-            quote!((#element_field + #elem_ty::FIELD_OFFSETS.#name_ident)
-                .apply_pin(#component_rust)
-            )
         }
-    } else if enclosing_component.is_global() {
-        let mut top_level_component = component.clone();
-        let mut component_rust = component_rust;
-        while let Some(p) = top_level_component.parent_element.upgrade() {
-            top_level_component = p.borrow().enclosing_component.upgrade().unwrap();
-            component_rust = quote!(#component_rust.parent.upgrade().unwrap().as_pin_ref());
+        llr::PropertyReference::InNativeItem { sub_component_path, item_index, prop_name } => {
+            let mut sub_component = ctx.current_sub_component.unwrap();
+            let mut compo_path = quote!();
+            for i in sub_component_path {
+                let component_id = inner_component_id(sub_component);
+                sub_component = &sub_component.sub_components[*i].ty;
+                let sub_component_name = ident(&sub_component.name);
+                compo_path = quote!(#compo_path #component_id::FIELD_OFFSETS.#sub_component_name +)
+            }
+            let component_id = inner_component_id(sub_component);
+            let item_name = ident(&sub_component.items[*item_index].name);
+            if prop_name.is_empty() {
+                // then this is actually a reference to the element itself
+                quote!((compo_path #component_id::FIELD_OFFSETS.#item_name).apply_pin(_self))
+            } else {
+                let property_name = ident(&prop_name);
+                let item_ty = ident(&sub_component.items[*item_index].ty.class_name);
+                let flick = sub_component.items[*item_index]
+                    .is_flickable_viewport
+                    .then(|| quote!(sixtyfps::re_exports::Flickable::FIELD_OFFSETS.viewport));
+                quote!((compo_path #component_id::FIELD_OFFSETS.#item_name #flick + #item_ty::FIELD_OFFSETS.#property_name).apply_pin(_self))
+            }
         }
-        if top_level_component.is_sub_component() {
-            component_rust =
-                quote!(#component_rust.root.get().unwrap().upgrade().unwrap().as_pin_ref());
+        llr::PropertyReference::InParent { level, parent_reference } => todo!(),
+        llr::PropertyReference::Global { global_index, property_index } => {
+            let root_access = &ctx.root_access;
+            let global_name = ident(&ctx.public_component.globals[*global_index].name);
+            let property_name = ident(
+                &ctx.public_component.globals[*global_index].properties[*property_index].name,
+            );
+            let global_id = format_ident!("global_{}", global_name,);
+            quote!(#global_name::FIELD_OFFSETS.#property_name.apply_pin(#root_access.#global_id.as_ref()))
         }
-        let global_id = format_ident!("global_{}", public_component_id(&enclosing_component));
-        let global_comp = quote!(#component_rust.#global_id.as_ref());
-        access_member(element, name, &enclosing_component, global_comp, is_special)
-    } else {
-        access_member(
-            element,
-            name,
-            &component
-                .parent_element
-                .upgrade()
-                .unwrap()
-                .borrow()
-                .enclosing_component
-                .upgrade()
-                .unwrap(),
-            quote!(#component_rust.parent.upgrade().unwrap().as_pin_ref()),
-            is_special,
-        )
     }
 }
 
-/// Call access_member  for a NamedReference
-fn access_named_reference(
-    nr: &NamedReference,
-    component: &Rc<Component>,
-    component_rust: TokenStream,
-) -> TokenStream {
-    access_member(&nr.element(), nr.name(), component, component_rust, false)
+fn access_window_field(ctx: &EvaluationContext) -> TokenStream {
+    let root = ctx.root_access;
+    quote!(root.window)
 }
 
+/*
 /// Returns the code that creates a VRc<ComponentVTable, Dyn> for the component of the given element
 fn element_component_vrc(element: &ElementRc, component: &Rc<Component>) -> TokenStream {
     let enclosing_component = element.borrow().enclosing_component.upgrade().unwrap();
@@ -1573,20 +1494,44 @@ fn absolute_element_item_index_expression(element: &ElementRc) -> TokenStream {
         quote!(#local_index)
     }
 }
+*/
 
-fn compile_expression(expr: &Expression, component: &Rc<Component>) -> TokenStream {
+/// Given a property reference to a native item (eg, the property name is empty)
+/// return tokens to the `ItemRc`
+fn access_item_rc(_pr: &llr::PropertyReference, _ctx: &EvaluationContext) -> TokenStream {
+    /*access_member(pr, ctx);
+    let focus_item = focus_item.upgrade().unwrap();
+    let component_vrc = element_component_vrc(&focus_item, component);
+    let item_index_tokens = absolute_element_item_index_expression(&focus_item);
+    quote!(&ItemRc::new(#component_vrc, #item_index_tokens))
+    */
+    quote!(todo!("access_item_rc"))
+}
+
+struct EvaluationContext<'a> {
+    public_component: &'a llr::PublicComponent,
+    current_sub_component: Option<&'a llr::SubComponent>,
+    current_global: Option<&'a llr::GlobalComponent>,
+    /// path to access the public_component (so one can access the globals).
+    /// e.g: `_self` in case we already are the root
+    root_access: TokenStream,
+    /// The repeater parent: path to the repeater's component, and the index of the repeater,
+    /// as well as the evaluation context within the parent
+    parent: Option<(TokenStream, usize, &'a EvaluationContext<'a>)>,
+}
+
+fn compile_expression(expr: &Expression, ctx: &EvaluationContext) -> TokenStream {
     match expr {
         Expression::StringLiteral(s) => quote!(sixtyfps::re_exports::SharedString::from(#s)),
-        Expression::NumberLiteral(n, unit) => {
-            let n = unit.normalize(*n);
-            quote!(#n)
-        }
+        Expression::NumberLiteral(n) => quote!(#n),
         Expression::BoolLiteral(b) => quote!(#b),
         Expression::Cast { from, to } => {
-            let f = compile_expression(&*from, component);
+            let f = compile_expression(&*from, ctx);
             match (from.ty(), to) {
                 (Type::Float32, Type::String) | (Type::Int32, Type::String) => {
-                    quote!(sixtyfps::re_exports::SharedString::from(sixtyfps::re_exports::format!("{}", #f).as_str()))
+                    quote!(sixtyfps::re_exports::SharedString::from(
+                        sixtyfps::re_exports::format!("{}", #f).as_str()
+                    ))
                 }
                 (Type::Float32, Type::Model) | (Type::Int32, Type::Model) => {
                     quote!(sixtyfps::re_exports::ModelHandle::new(sixtyfps::re_exports::Rc::<usize>::new(#f as usize)))
@@ -1606,10 +1551,10 @@ fn compile_expression(expr: &Expression, component: &Rc<Component>) -> TokenStre
                         let name = ident(name);
                         quote!(#name: obj.#index as _)
                     });
-                    let id : TokenStream = c.id.parse().unwrap();
+                    let id: TokenStream = c.id.parse().unwrap();
                     quote!({ let obj = #f; #id { #(#fields),*} })
                 }
-                (Type::Struct { ref fields, .. }, Type::Struct{  name: Some(n), .. }) => {
+                (Type::Struct { ref fields, .. }, Type::Struct { name: Some(n), .. }) => {
                     let fields = fields.iter().enumerate().map(|(index, (name, _))| {
                         let index = proc_macro2::Literal::usize_unsuffixed(index);
                         let name = ident(name);
@@ -1622,89 +1567,23 @@ fn compile_expression(expr: &Expression, component: &Rc<Component>) -> TokenStre
             }
         }
         Expression::PropertyReference(nr) => {
-            let access = access_named_reference(nr, component, quote!(_self));
+            let access = access_member(nr, ctx);
             quote!(#access.get())
         }
-        Expression::BuiltinFunctionReference(funcref, _) => match funcref {
-            BuiltinFunction::GetWindowScaleFactor => {
-                let window_tokens = access_window_field(component, quote!(_self));
-                quote!(#window_tokens.window_handle().scale_factor)
-            }
-            BuiltinFunction::Debug => quote!((|x| println!("{:?}", x))),
-            BuiltinFunction::Mod => quote!((|a1, a2| (a1 as i32) % (a2 as i32))),
-            BuiltinFunction::Round => quote!((|a| (a as f64).round())),
-            BuiltinFunction::Ceil => quote!((|a| (a as f64).ceil())),
-            BuiltinFunction::Floor => quote!((|a| (a as f64).floor())),
-            BuiltinFunction::Sqrt => quote!((|a| (a as f64).sqrt())),
-            BuiltinFunction::Abs => quote!((|a| (a as f64).abs())),
-            BuiltinFunction::Sin => quote!((|a| (a as f64).to_radians().sin())),
-            BuiltinFunction::Cos => quote!((|a| (a as f64).to_radians().cos())),
-            BuiltinFunction::Tan => quote!((|a| (a as f64).to_radians().tan())),
-            BuiltinFunction::ASin => quote!((|a| (a as f64).asin().to_degrees())),
-            BuiltinFunction::ACos => quote!((|a| (a as f64).acos().to_degrees())),
-            BuiltinFunction::ATan => quote!((|a| (a as f64).atan().to_degrees())),
-            BuiltinFunction::SetFocusItem | BuiltinFunction::ShowPopupWindow | BuiltinFunction::ImplicitLayoutInfo(_) => {
-                panic!("internal error: should be handled directly in CallFunction")
-            }
-            BuiltinFunction::StringToFloat => {
-                quote!((|x: SharedString| -> f64 { ::core::str::FromStr::from_str(x.as_str()).unwrap_or_default() } ))
-            }
-            BuiltinFunction::StringIsFloat => {
-                quote!((|x: SharedString| { <f64 as ::core::str::FromStr>::from_str(x.as_str()).is_ok() } ))
-            }
-            BuiltinFunction::ColorBrighter => {
-                quote!((|x: Color, factor| -> Color { x.brighter(factor as f32) }))
-            }
-            BuiltinFunction::ColorDarker => {
-                quote!((|x: Color, factor| -> Color { x.darker(factor as f32) }))
-            }
-            BuiltinFunction::ImageSize => {
-                quote!((|x: Image| -> Size { x.size() }))
-            }
-            BuiltinFunction::ArrayLength => {
-                quote!((|x: ModelHandle<_>| -> i32 { x.model_tracker().track_row_count_changes(); x.row_count() as i32 }))
-            }
-
-            BuiltinFunction::Rgb => {
-                quote!((|r: i32, g: i32, b: i32, a: f32| {
-                    let r: u8 = r.max(0).min(255) as u8;
-                    let g: u8 = g.max(0).min(255) as u8;
-                    let b: u8 = b.max(0).min(255) as u8;
-                    let a: u8 = (255. * a).max(0.).min(255.) as u8;
-                    sixtyfps::re_exports::Color::from_argb_u8(a, r, g, b)
-                }))
-            }
-            BuiltinFunction::RegisterCustomFontByPath => {
-                panic!("internal error: BuiltinFunction::RegisterCustomFontByPath can only be compiled as part of a FunctionCall expression")
-            }
-            BuiltinFunction::RegisterCustomFontByMemory => {
-                panic!("internal error: BuiltinFunction::RegisterCustomFontByMemory can only be compiled as part of a FunctionCall expression")
-            }
-        },
-        Expression::ElementReference(_) => todo!("Element references are only supported in the context of built-in function calls at the moment"),
-        Expression::MemberFunction{ .. } => panic!("member function expressions must not appear in the code generator anymore"),
-        Expression::BuiltinMacroReference { .. } => panic!("macro expressions must not appear in the code generator anymore"),
-        Expression::RepeaterIndexReference { element } => {
-            let access = access_member(
-                &element.upgrade().unwrap().borrow().base_type.as_component().root_element,
-                "index",
-                component,
-                quote!(_self),
-                true,
-            );
-            quote!(#access.get())
+        Expression::BuiltinFunctionCall { function, arguments } => {
+            compile_builtin_function_call(*function, &arguments, ctx)
         }
-        Expression::RepeaterModelReference { element } => {
-            let access = access_member(
-                &element.upgrade().unwrap().borrow().base_type.as_component().root_element,
-                "model_data",
-                component,
-                quote!(_self),
-                true,
-            );
-            quote!(#access.get())
+        Expression::CallBackCall { callback, arguments } => {
+            let f = access_member(callback, ctx);
+            let a = arguments.iter().map(|a| compile_expression(a, ctx));
+            quote! { #f.call(&(#(#a.clone() as _,)*).into())}
         }
-        Expression::FunctionParameterReference { index, .. } => {
+        Expression::ExtraBuiltinFunctionCall { function, arguments } => {
+            let f = ident(&function);
+            let a = arguments.iter().map(|a| compile_expression(a, ctx));
+            quote! { #f(#(#a)*).into()}
+        }
+        Expression::FunctionParameterReference { index } => {
             let i = proc_macro2::Literal::usize_unsuffixed(*index);
             quote! {args.#i.clone()}
         }
@@ -1713,149 +1592,56 @@ fn compile_expression(expr: &Expression, component: &Rc<Component>) -> TokenStre
                 let index = fields
                     .keys()
                     .position(|k| k == name)
-                    .expect("Expression::ObjectAccess: Cannot find a key in an object");
+                    .expect("Expression::StructFieldAccess: Cannot find a key in an object");
                 let index = proc_macro2::Literal::usize_unsuffixed(index);
-                let base_e = compile_expression(base, component);
+                let base_e = compile_expression(base, ctx);
                 quote!((#base_e).#index )
             }
             Type::Struct { .. } => {
                 let name = ident(name);
-                let base_e = compile_expression(base, component);
+                let base_e = compile_expression(base, ctx);
                 quote!((#base_e).#name)
             }
-            _ => panic!("Expression::ObjectAccess's base expression is not an Object type"),
+            _ => panic!("Expression::StructFieldAccess's base expression is not an Object type"),
         },
         Expression::CodeBlock(sub) => {
-            let map = sub.iter().map(|e| compile_expression(e, component));
+            let map = sub.iter().map(|e| compile_expression(e, ctx));
             quote!({ #(#map);* })
         }
-        Expression::CallbackReference(nr) => access_named_reference(
-            nr,
-            component,
-            quote!(_self),
-        ),
-        Expression::FunctionCall { function, arguments,  source_location: _ } => {
-            match &**function {
-                Expression::BuiltinFunctionReference(BuiltinFunction::SetFocusItem, _) => {
-                    if arguments.len() != 1 {
-                        panic!("internal error: incorrect argument count to SetFocusItem call");
-                    }
-                    if let Expression::ElementReference(focus_item) = &arguments[0] {
-                        let focus_item = focus_item.upgrade().unwrap();
-                        let component_vrc = element_component_vrc(&focus_item, component);
-                        let item_index_tokens = absolute_element_item_index_expression(&focus_item);
-                        let window_tokens = access_window_field(component, quote!(_self));
-                        quote!(
-                            #window_tokens.window_handle().clone().set_focus_item(&ItemRc::new(#component_vrc, #item_index_tokens));
-                        )
-                    } else {
-                        panic!("internal error: argument to SetFocusItem must be an element")
-                    }
-                }
-                Expression::BuiltinFunctionReference(BuiltinFunction::ShowPopupWindow, _) => {
-                    if arguments.len() != 1 {
-                        panic!("internal error: incorrect argument count to ShowPopupWindow call");
-                    }
-                    if let Expression::ElementReference(popup_window) = &arguments[0] {
-                        let popup_window = popup_window.upgrade().unwrap();
-                        let pop_comp = popup_window.borrow().enclosing_component.upgrade().unwrap();
-                        let popup_window_id = inner_component_id(&pop_comp);
-                        let parent_component = pop_comp.parent_element.upgrade().unwrap().borrow().enclosing_component.upgrade().unwrap();
-                        let popup_list = parent_component.popup_windows.borrow();
-                        let popup = popup_list.iter().find(|p| Rc::ptr_eq(&p.component, &pop_comp)).unwrap();
-                        let x = access_named_reference(&popup.x, component, quote!(_self));
-                        let y = access_named_reference(&popup.y, component, quote!(_self));
-                        let parent_component_vrc = element_component_vrc(&popup.parent_element, component);
-                        let parent_index_tokens = absolute_element_item_index_expression(&popup.parent_element);
-                        let window_tokens = access_window_field(component, quote!(_self));
-                        quote!(
-                            #window_tokens.window_handle().show_popup(
-                                &VRc::into_dyn(#popup_window_id::new(_self.self_weak.get().unwrap().clone(), &#window_tokens.window_handle()).into()),
-                                Point::new(#x.get(), #y.get()),
-                                &ItemRc::new(#parent_component_vrc, #parent_index_tokens)
-                            );
-                        )
-                    } else {
-                        panic!("internal error: argument to SetFocusItem must be an element")
-                    }
-                }
-                Expression::BuiltinFunctionReference(BuiltinFunction::ImplicitLayoutInfo(orient), _) => {
-                    if arguments.len() != 1 {
-                        panic!("internal error: incorrect argument count to ImplicitLayoutInfo call");
-                    }
-                    if let Expression::ElementReference(item) = &arguments[0] {
-                        let item = item.upgrade().unwrap();
-                        let item = item.borrow();
-                        let item_id = ident(&item.id);
-                        let item_field = access_component_field_offset(&format_ident!("Self"), &item_id);
-                        let window_tokens = access_window_field(component, quote!(_self));
-                        quote!(
-                            #item_field.apply_pin(_self).layout_info(#orient, &#window_tokens.window_handle())
-                        )
-                    } else {
-                        panic!("internal error: argument to ImplicitLayoutInfo must be an element")
-                    }
-                }
-                Expression::BuiltinFunctionReference(BuiltinFunction::RegisterCustomFontByPath, _) => {
-                    if arguments.len() != 1 {
-                        panic!("internal error: incorrect argument count to RegisterCustomFontByPath call");
-                    }
-                    if let Expression::StringLiteral(path) = &arguments[0] {
-                        quote!(sixtyfps::register_font_from_path(&std::path::PathBuf::from(#path));)
-                    } else {
-                        panic!("internal error: argument to RegisterCustomFontByPath must be a string literal")
-                    }
-                }
-                Expression::BuiltinFunctionReference(BuiltinFunction::RegisterCustomFontByMemory, _) => {
-                    if arguments.len() != 1 {
-                        panic!("internal error: incorrect argument count to RegisterCustomFontByMemory call");
-                    }
-                    if let Expression::NumberLiteral(resource_id, _) = &arguments[0] {
-                        let resource_id: usize = *resource_id as _;
-                        let symbol = format_ident!("SFPS_EMBEDDED_RESOURCE_{}", resource_id);
-                        quote!(sixtyfps::register_font_from_memory(#symbol.into());)
-                    } else {
-                        panic!("internal error: argument to RegisterCustomFontByMemory must be a number")
-                    }
-                }
-                _ => {
-                    let f = compile_expression(function, component);
-                    let a = arguments.iter().map(|a| compile_expression(a, component));
-                    let function_type = function.ty();
-                    match function_type {
-                         Type::Callback { args, .. } => {
-                            let cast = args.iter().map(|ty| match ty {
-                                Type::Bool => quote!(as bool),
-                                Type::Int32 => quote!(as i32),
-                                Type::Float32 => quote!(as f32),
-                                _ => quote!(.clone()),
-                            });
-                            quote! { #f.call(&(#((#a)#cast,)*).into())}
-                        }
-                        Type::Function {args, .. } => {
-                            let cast = args.iter().map(|ty| match ty {
-                                Type::Bool => quote!(as bool),
-                                Type::Int32 => quote!(as i32),
-                                Type::Float32 => quote!(as f32),
-                                _ => quote!(.clone()),
-                            });
-                            quote! { #f(#((#a) #cast),*)}
-                        }
-                        _ => panic!("not calling a function")
-                    }
-                }
-            }
-
+        Expression::PropertyAssignment { property, value } => {
+            let value = compile_expression(value, ctx);
+            property_set_value_tokens(property, value, ctx)
         }
-        Expression::SelfAssignment { lhs, rhs, op } => {
-            let rhs = compile_expression(&*rhs, component);
-            compile_assignment(lhs, *op, rhs, component)
+        Expression::ModelDataAssignment { level, value } => {
+            let value = compile_expression(value, ctx);
+            let mut path = quote!(self_);
+            let mut ctx2 = ctx;
+            let mut repeater_index = 0;
+            for _ in 0..=*level {
+                let x = ctx.parent.clone().unwrap();
+                let p = x.0;
+                ctx = x.2;
+                repeater_index = x.1;
+                path = quote!(#path.#p);
+            }
+            let repeater_id = format_ident!("repeater{}", repeater_index);
+            let mut index_prop = llr::PropertyReference::Local {
+                sub_component_path: vec![],
+                property_index: ctx2.current_sub_component.unwrap().repeated[repeater_index]
+                    .index_prop,
+            };
+            if let Some(level) = NonZeroUsize::new(*level) {
+                index_prop =
+                    llr::PropertyReference::InParent { level, parent_reference: index_prop.into() };
+            }
+            let index_access = access_member(&index_prop, ctx);
+            quote!(#path.#repeater_id.model_set_row_data(#index_access.get(), #value as _))
         }
         Expression::BinaryExpression { lhs, rhs, op } => {
             let (conv1, conv2) = match crate::expression_tree::operator_class(*op) {
                 OperatorClass::ArithmeticOp => match lhs.ty() {
                     Type::String => (None, Some(quote!(.as_str()))),
-                    Type::Struct{..} => (None, None),
+                    Type::Struct { .. } => (None, None),
                     _ => (Some(quote!(as f64)), Some(quote!(as f64))),
                 },
                 OperatorClass::ComparisonOp
@@ -1873,8 +1659,8 @@ fn compile_expression(expr: &Expression, component: &Rc<Component>) -> TokenStre
                 }
                 _ => (None, None),
             };
-            let lhs = compile_expression(&*lhs, component);
-            let rhs = compile_expression(&*rhs, component);
+            let lhs = compile_expression(&*lhs, ctx);
+            let rhs = compile_expression(&*rhs, ctx);
 
             let op = match op {
                 '=' => quote!(==),
@@ -1892,7 +1678,7 @@ fn compile_expression(expr: &Expression, component: &Rc<Component>) -> TokenStre
             quote!( ((#lhs #conv1 ) #op (#rhs #conv2)) )
         }
         Expression::UnaryOp { sub, op } => {
-            let sub = compile_expression(&*sub, component);
+            let sub = compile_expression(&*sub, ctx);
             if *op == '+' {
                 // there is no unary '+' in rust
                 return sub;
@@ -1900,35 +1686,33 @@ fn compile_expression(expr: &Expression, component: &Rc<Component>) -> TokenStre
             let op = proc_macro2::Punct::new(*op, proc_macro2::Spacing::Alone);
             quote!( #op #sub )
         }
-        Expression::ImageReference { resource_ref, .. } => {
-            match resource_ref {
-                crate::expression_tree::ImageReference::None => {
-                    quote!(sixtyfps::re_exports::Image::default())
-                }
-                crate::expression_tree::ImageReference::AbsolutePath(path) => {
-                     quote!(sixtyfps::re_exports::Image::load_from_path(::std::path::Path::new(#path)).unwrap())
-                },
-                crate::expression_tree::ImageReference::EmbeddedData { resource_id, extension,  } => {
-                    let symbol = format_ident!("SFPS_EMBEDDED_RESOURCE_{}", resource_id);
-                    let format = proc_macro2::Literal::byte_string(extension.as_bytes());
-                    quote!(
-                        sixtyfps::re_exports::Image::from(
-                            sixtyfps::re_exports::ImageInner::EmbeddedData{ data: #symbol.into(), format: Slice::from_slice(#format) }
-                        )
-                    )
-                }
-                crate::expression_tree::ImageReference::EmbeddedTexture { resource_id, } => {
-                    let symbol = format_ident!("SFPS_EMBEDDED_RESOURCE_{}", resource_id);
-                    quote!(
-                        sixtyfps::re_exports::Image::from(#symbol)
-                    )
-                }
+        Expression::ImageReference { resource_ref, .. } => match resource_ref {
+            crate::expression_tree::ImageReference::None => {
+                quote!(sixtyfps::re_exports::Image::default())
             }
-        }
+            crate::expression_tree::ImageReference::AbsolutePath(path) => {
+                quote!(sixtyfps::re_exports::Image::load_from_path(::std::path::Path::new(#path)).unwrap())
+            }
+            crate::expression_tree::ImageReference::EmbeddedData { resource_id, extension } => {
+                let symbol = format_ident!("SFPS_EMBEDDED_RESOURCE_{}", resource_id);
+                let format = proc_macro2::Literal::byte_string(extension.as_bytes());
+                quote!(
+                    sixtyfps::re_exports::Image::from(
+                        sixtyfps::re_exports::ImageInner::EmbeddedData{ data: #symbol.into(), format: Slice::from_slice(#format) }
+                    )
+                )
+            }
+            crate::expression_tree::ImageReference::EmbeddedTexture { resource_id } => {
+                let symbol = format_ident!("SFPS_EMBEDDED_RESOURCE_{}", resource_id);
+                quote!(
+                    sixtyfps::re_exports::Image::from(#symbol)
+                )
+            }
+        },
         Expression::Condition { condition, true_expr, false_expr } => {
-            let condition_code = compile_expression(&*condition, component);
-            let true_code = compile_expression(&*true_expr, component);
-            let false_code = compile_expression(&*false_expr, component);
+            let condition_code = compile_expression(&*condition, ctx);
+            let true_code = compile_expression(&*true_expr, ctx);
+            let false_code = false_expr.as_ref().map(|e| compile_expression(e, ctx));
             quote!(
                 if #condition_code {
                     #true_code
@@ -1937,13 +1721,9 @@ fn compile_expression(expr: &Expression, component: &Rc<Component>) -> TokenStre
                 }
             )
         }
-        Expression::Invalid | Expression::Uncompiled(_)  => {
-            let error = format!("unsupported expression {:?}", expr);
-            quote!(compile_error! {#error})
-        }
         Expression::Array { values, element_ty } => {
             let rust_element_ty = rust_type(element_ty).unwrap();
-            let val = values.iter().map(|e| compile_expression(e, component));
+            let val = values.iter().map(|e| compile_expression(e, ctx));
             quote!(sixtyfps::re_exports::ModelHandle::new(
                 sixtyfps::re_exports::Rc::new(sixtyfps::re_exports::VecModel::<#rust_element_ty>::from(
                     sixtyfps::re_exports::vec![#(#val as _),*]
@@ -1954,13 +1734,13 @@ fn compile_expression(expr: &Expression, component: &Rc<Component>) -> TokenStre
             if let Type::Struct { fields, name, .. } = ty {
                 let elem = fields.iter().map(|(k, t)| {
                     values.get(k).map(|e| {
-                        let ce = compile_expression(e, component);
+                        let ce = compile_expression(e, ctx);
                         let t = rust_type(t).unwrap_or_default();
                         quote!(#ce as #t)
                     })
                 });
                 if let Some(name) = name {
-                    let name : TokenStream = struct_name_to_tokens(name.as_str());
+                    let name: TokenStream = struct_name_to_tokens(name.as_str());
                     let keys = fields.keys().map(|k| ident(k));
                     quote!(#name { #(#keys: #elem,)* })
                 } else {
@@ -1968,12 +1748,12 @@ fn compile_expression(expr: &Expression, component: &Rc<Component>) -> TokenStre
                     quote!((#(#elem,)*))
                 }
             } else {
-                panic!("Expression::Object is not a Type::Object")
+                panic!("Expression::Struct is not a Type::Struct")
             }
         }
-        Expression::PathElements { elements } => compile_path(elements, component),
+        Expression::PathEvents(_) => quote!(todo!("Expression::PathEvents")),
         Expression::StoreLocalVariable { name, value } => {
-            let value = compile_expression(value, component);
+            let value = compile_expression(value, ctx);
             let name = ident(name);
             quote!(let #name = #value;)
         }
@@ -1987,11 +1767,11 @@ fn compile_expression(expr: &Expression, component: &Rc<Component>) -> TokenStre
         Expression::EasingCurve(EasingCurve::CubicBezier(a, b, c, d)) => {
             quote!(sixtyfps::re_exports::EasingCurve::CubicBezier([#a, #b, #c, #d]))
         }
-        Expression::LinearGradient{angle, stops} => {
-            let angle = compile_expression(angle, component);
+        Expression::LinearGradient { angle, stops } => {
+            let angle = compile_expression(angle, ctx);
             let stops = stops.iter().map(|(color, stop)| {
-                let color = compile_expression(color, component);
-                let position = compile_expression(stop, component);
+                let color = compile_expression(color, ctx);
+                let position = compile_expression(stop, ctx);
                 quote!(sixtyfps::re_exports::GradientStop{ color: #color, position: #position as _ })
             });
             quote!(sixtyfps::Brush::LinearGradient(
@@ -2004,13 +1784,13 @@ fn compile_expression(expr: &Expression, component: &Rc<Component>) -> TokenStre
             quote!(sixtyfps::re_exports::#base_ident::#value_ident)
         }
         Expression::ReturnStatement(expr) => {
-            let return_expr = expr.as_ref().map(|expr| compile_expression(expr, component));
+            let return_expr = expr.as_ref().map(|expr| compile_expression(expr, ctx));
             quote!(return (#return_expr) as _;)
-        },
+        }
         Expression::LayoutCacheAccess { layout_cache_prop, index, repeater_index } => {
-            let cache = access_named_reference(layout_cache_prop, component, quote!(_self));
+            let cache = access_member(layout_cache_prop, ctx);
             if let Some(ri) = repeater_index {
-                let offset = compile_expression(ri, component);
+                let offset = compile_expression(ri, ctx);
                 quote!({
                     let cache = #cache.get();
                     *cache.get((cache[#index] as usize) + #offset as usize * 2).unwrap_or(&0.)
@@ -2019,94 +1799,132 @@ fn compile_expression(expr: &Expression, component: &Rc<Component>) -> TokenStre
                 quote!(#cache.get()[#index])
             }
         }
-        Expression::ComputeLayoutInfo(Layout::GridLayout(layout), o) => {
-            let (padding, spacing) = generate_layout_padding_and_spacing(&layout.geometry, *o, component);
-            let cells = grid_layout_cell_data(layout, *o, component);
-            quote!(grid_layout_info(Slice::from_slice(&#cells), #spacing, #padding))
+        Expression::BoxLayoutCellDataArray { elements, repeater_indices, orientation } => {
+            box_layout_data(
+                elements,
+                repeater_indices.as_ref().map(|x| x.as_str()),
+                *orientation,
+                ctx,
+            )
         }
-        Expression::ComputeLayoutInfo(Layout::BoxLayout(layout), o) => {
-            let (padding, spacing) = generate_layout_padding_and_spacing(&layout.geometry,*o, component);
-            let (cells, alignment) = box_layout_data(layout, *o, component, None);
-            if *o == layout.orientation {
-                quote!(box_layout_info(Slice::from_slice(&#cells), #spacing, #padding, #alignment))
+    }
+}
+
+fn compile_builtin_function_call(
+    function: BuiltinFunction,
+    arguments: &[Expression],
+    ctx: &EvaluationContext,
+) -> TokenStream {
+    let a = arguments.iter().map(|a| compile_expression(a, ctx));
+    match function {
+        BuiltinFunction::SetFocusItem => {
+            if let [Expression::PropertyReference(pr)] = arguments {
+                let window_tokens = access_window_field(ctx);
+                let focus_item = access_item_rc(pr, ctx);
+                quote!(
+                    #window_tokens.window_handle().clone().set_focus_item(#focus_item);
+                )
             } else {
-                quote!(box_layout_info_ortho(Slice::from_slice(&#cells), #padding))
+                panic!("internal error: invalid args to SetFocusItem {:?}", arguments)
             }
         }
-        Expression::ComputeLayoutInfo(Layout::PathLayout(_), _) => unimplemented!(),
-        Expression::SolveLayout(Layout::GridLayout(layout), o) => {
-            let (padding, spacing) = generate_layout_padding_and_spacing(&layout.geometry, *o, component);
-            let cells = grid_layout_cell_data(layout, *o, component);
-            let size = layout_geometry_size(&layout.geometry.rect, *o, component);
-            if let (Some(button_roles), Orientation::Horizontal) = (&layout.dialog_button_roles, *o) {
-                let role = button_roles.iter().map(|x| format_ident!("{}", x));
-                quote!({
-                    let mut cells = #cells;
-                    reorder_dialog_button_layout(&mut cells, &[ #(DialogButtonRole::#role),* ]);
-                    solve_grid_layout(&GridLayoutData{
-                        size: #size,
-                        spacing: #spacing,
-                        padding: #padding,
-                        cells: Slice::from_slice(&cells),
-                    })
-                })
+        BuiltinFunction::ShowPopupWindow => {
+            if let [Expression::NumberLiteral(popup_index), x, y, Expression::PropertyReference(parent_ref)] =
+                arguments
+            {
+                let current_sub_component = ctx.current_sub_component.unwrap();
+                let popup_window_id =
+                    ident(&current_sub_component.popup_windows[*popup_index as usize].root.name);
+                let parent_component = quote!(todo!(BuiltinFunction::ShowPopupWindow));
+                let x = compile_expression(x, ctx);
+                let y = compile_expression(y, ctx);
+                let window_tokens = access_window_field(ctx);
+                quote!(
+                    #window_tokens.window_handle().show_popup(
+                        &VRc::into_dyn(#popup_window_id::new(_self.self_weak.get().unwrap().clone(), &#window_tokens.window_handle()).into()),
+                        Point::new(#x, #y),
+                        parent_component
+                    );
+                )
             } else {
-                quote!(solve_grid_layout(&GridLayoutData{
-                    size: #size,
-                    spacing: #spacing,
-                    padding: #padding,
-                    cells: Slice::from_slice(&#cells),
-                }))
+                panic!("internal error: invalid args to ShowPopupWindow {:?}", arguments)
             }
         }
-        Expression::SolveLayout(Layout::BoxLayout(layout), o) => {
-            let (padding, spacing) = generate_layout_padding_and_spacing(&layout.geometry, *o, component);
-            let mut repeated_indices = Default::default();
-            let mut repeated_indices_init = Default::default();
-            let (cells, alignment) = box_layout_data(layout, *o, component, Some((&mut repeated_indices, &mut repeated_indices_init)));
-            let size = layout_geometry_size(&layout.geometry.rect, *o, component);
-            quote!({
-                #repeated_indices_init
-                solve_box_layout(
-                    &BoxLayoutData {
-                        size: #size,
-                        spacing: #spacing,
-                        padding: #padding,
-                        alignment: #alignment,
-                        cells: Slice::from_slice(&#cells),
-                    },
-                    Slice::from_slice(&#repeated_indices),
+        BuiltinFunction::ImplicitLayoutInfo(orient) => {
+            if let [Expression::PropertyReference(pr)] = arguments {
+                let item = access_member(pr, ctx);
+                let window_tokens = access_window_field(ctx);
+                quote!(
+                    #item.layout_info(#orient, &#window_tokens.window_handle())
                 )
-            })
+            } else {
+                panic!("internal error: invalid args to ImplicitLayoutInfo {:?}", arguments)
+            }
         }
-        Expression::SolveLayout(Layout::PathLayout(layout), _) => {
-            let width = layout_geometry_size(&layout.rect, Orientation::Horizontal, component);
-            let height = layout_geometry_size(&layout.rect, Orientation::Vertical, component);
-            let elements = compile_path(&layout.path, component);
-            let get_prop = |nr: &Option<NamedReference>| {
-                nr.as_ref().map_or_else(
-                    || quote!(::core::default::Default::default()),
-                    |nr| {
-                        let p = access_named_reference(nr, component, quote!(_self));
-                        quote!(#p.get())
-                    },
-                )
-            };
-            let offset = get_prop(&layout.offset_reference);
-            let count = layout.elements.len(); // FIXME! repeater
+        BuiltinFunction::RegisterCustomFontByPath => {
+            if let [Expression::StringLiteral(path)] = arguments {
+                quote!(sixtyfps::register_font_from_path(&std::path::PathBuf::from(#path));)
+            } else {
+                panic!("internal error: invalid args to RegisterCustomFontByPath {:?}", arguments)
+            }
+        }
+        BuiltinFunction::RegisterCustomFontByMemory => {
+            if let [Expression::NumberLiteral(resource_id)] = &arguments {
+                let resource_id: usize = *resource_id as _;
+                let symbol = format_ident!("SFPS_EMBEDDED_RESOURCE_{}", resource_id);
+                quote!(sixtyfps::register_font_from_memory(#symbol.into());)
+            } else {
+                panic!("internal error: invalid args to RegisterCustomFontByMemory {:?}", arguments)
+            }
+        }
+        BuiltinFunction::GetWindowScaleFactor => {
+            let window_tokens = access_window_field(ctx);
+            quote!(#window_tokens.window_handle().scale_factor)
+        }
+        BuiltinFunction::Debug => quote!(println!("{:?}", #(#a)*)),
+        BuiltinFunction::Mod => quote!((#(#a as i32)%*)),
+        BuiltinFunction::Round => quote!((#(#a)* as f64).round()),
+        BuiltinFunction::Ceil => quote!((#(#a)* as f64).ceil()),
+        BuiltinFunction::Floor => quote!((#(#a)* as f64).floor()),
+        BuiltinFunction::Sqrt => quote!((#(#a)* as f64).sqrt()),
+        BuiltinFunction::Abs => quote!((#(#a)* as f64).abs()),
+        BuiltinFunction::Sin => quote!((#(#a)* as f64).to_radians().sin()),
+        BuiltinFunction::Cos => quote!((#(#a)* as f64).to_radians().cos()),
+        BuiltinFunction::Tan => quote!((#(#a)* as f64).to_radians().tan()),
+        BuiltinFunction::ASin => quote!((#(#a)* as f64).asin().to_degrees()),
+        BuiltinFunction::ACos => quote!((#(#a)* as f64).acos().to_degrees()),
+        BuiltinFunction::ATan => quote!((#(#a)* as f64).atan().to_degrees()),
+        BuiltinFunction::StringToFloat => {
+            quote!(#(#a)*.as_str().parse::<f64>().unwrap_or_default())
+        }
+        BuiltinFunction::StringIsFloat => quote!(#(#a)*.as_str().parse::<f64>().is_ok()),
+        BuiltinFunction::ColorBrighter => {
+            let x = a.next().unwrap();
+            let factor = a.next().unwrap();
+            quote!(#x.brighter(#factor as f32))
+        }
+        BuiltinFunction::ColorDarker => {
+            let x = a.next().unwrap();
+            let factor = a.next().unwrap();
+            quote!(#x.darker(#factor as f32))
+        }
+        BuiltinFunction::ImageSize => quote!( #(#a)*.size()),
+        BuiltinFunction::ArrayLength => {
+            quote!(match #(#a)* { x => {
+                x.model_tracker().track_row_count_changes();
+                x.row_count() as i32
+            }})
+        }
+
+        BuiltinFunction::Rgb => {
             quote!(
-                solve_path_layout(
-                    &PathLayoutData {
-                        width: #width,
-                        height: #height,
-                        x: 0.,
-                        y: 0.,
-                        elements: &#elements,
-                        offset: #offset,
-                        item_count: #count as _,
-                    },
-                    Slice::from_slice(&[]),
-                )
+                (|r: i32, g: i32, b: i32, a: f32| {
+                    let r: u8 = r.max(0).min(255) as u8;
+                    let g: u8 = g.max(0).min(255) as u8;
+                    let b: u8 = b.max(0).min(255) as u8;
+                    let a: u8 = (255. * a).max(0.).min(255.) as u8;
+                    sixtyfps::re_exports::Color::from_argb_u8(a, r, g, b)
+                })(#(#a),*)
             )
         }
     }
@@ -2122,311 +1940,65 @@ fn struct_name_to_tokens(name: &str) -> TokenStream {
     name.parse().unwrap()
 }
 
-fn compile_assignment(
-    lhs: &Expression,
-    op: char,
-    rhs: TokenStream,
-    component: &Rc<Component>,
-) -> TokenStream {
-    match lhs {
-        Expression::PropertyReference(nr) => {
-            let lhs_ = access_named_reference(nr, component, quote!(_self));
-            let set = if op == '=' {
-                property_set_value_tokens(component, &nr.element(), nr.name(), quote!((#rhs) as _))
-            } else {
-                let op = proc_macro2::Punct::new(op, proc_macro2::Spacing::Alone);
-                property_set_value_tokens(
-                    component,
-                    &nr.element(),
-                    nr.name(),
-                    if lhs.ty() == Type::String {
-                        quote!( #lhs_.get() #op #rhs.as_str())
-                    } else {
-                        quote!( ((#lhs_.get() as f64) #op (#rhs as f64)) as _)
-                    },
-                )
-            };
-            quote!( #lhs_.#set )
-        }
-        Expression::StructFieldAccess { base, name } => {
-            let tmpobj = quote!(tmpobj);
-            let get_obj = compile_expression(base, component);
-            let ty = base.ty();
-            let (member, member_ty) = match &ty {
-                Type::Struct { fields, name: None, .. } => {
-                    let index = fields
-                        .keys()
-                        .position(|k| k == name)
-                        .expect("Expression::ObjectAccess: Cannot find a key in an object");
-                    let index = proc_macro2::Literal::usize_unsuffixed(index);
-                    (quote!(#index), fields[name].clone())
-                }
-                Type::Struct { fields, name: Some(_), .. } => {
-                    let n = ident(name);
-                    (quote!(#n), fields[name].clone())
-                }
-                _ => panic!("Expression::ObjectAccess's base expression is not an Object type"),
-            };
-
-            let conv = if member_ty == Type::String {
-                if op == '=' {
-                    quote!()
-                } else {
-                    quote!(.as_str())
-                }
-            } else {
-                let member_ty = rust_type(&member_ty).unwrap_or_default();
-                quote!(as #member_ty)
-            };
-
-            let op = match op {
-                '+' => quote!(+=),
-                '*' => quote!(*=),
-                '-' => quote!(-=),
-                '/' => quote!(/=),
-                '=' => quote!(=),
-                _ => panic!("Unknown assignment op {:?}", op),
-            };
-
-            let new_value = quote!({
-               let mut #tmpobj = #get_obj;
-               #tmpobj.#member #op (#rhs #conv);
-               #tmpobj
-            });
-            compile_assignment(base, '=', new_value, component)
-        }
-        Expression::RepeaterModelReference { element } => {
-            let element = element.upgrade().unwrap();
-            let parent_component = element.borrow().base_type.as_component().clone();
-            let repeater_access = access_member(
-                &parent_component
-                    .parent_element
-                    .upgrade()
-                    .unwrap()
-                    .borrow()
-                    .enclosing_component
-                    .upgrade()
-                    .unwrap()
-                    .root_element,
-                &format!("repeater_{}", element.borrow().id),
-                component,
-                quote!(_self),
-                true,
-            );
-            let index_access = access_member(
-                &parent_component.root_element,
-                "index",
-                component,
-                quote!(_self),
-                true,
-            );
-            if op == '=' {
-                quote!(#repeater_access.model_set_row_data(#index_access.get(), #rhs as _))
-            } else {
-                let op = proc_macro2::Punct::new(op, proc_macro2::Spacing::Alone);
-                let old_data = compile_expression(lhs, component);
-                if lhs.ty() == Type::String {
-                    quote!(#repeater_access.model_set_row_data(#index_access.get(), #old_data #op &#rhs))
-                } else {
-                    quote!(#repeater_access.model_set_row_data(#index_access.get(), ((#old_data as f64) #op (#rhs as f64)) as _))
-                }
-            }
-        }
-        _ => panic!("typechecking should make sure this was a PropertyReference"),
-    }
-}
-
-fn grid_layout_cell_data(
-    layout: &crate::layout::GridLayout,
-    orientation: Orientation,
-    component: &Rc<Component>,
-) -> TokenStream {
-    let cells = layout.elems.iter().map(|c| {
-        let (col_or_row, span) = c.col_or_row_and_span(orientation);
-        let layout_info =
-            get_layout_info(&c.item.element, component, &c.item.constraints, orientation);
-        quote!(GridLayoutCellData {
-            col_or_row: #col_or_row,
-            span: #span,
-            constraint: #layout_info,
-        })
-    });
-    quote!([ #(#cells),* ])
-}
-
-/// Returns `(cells, alignment)`.
-/// The repeated_indices initialize the repeated_indices (var, init_code)
 fn box_layout_data(
-    layout: &crate::layout::BoxLayout,
+    elements: &[Either<Expression, usize>],
+    repeated_indices: Option<&str>,
     orientation: Orientation,
-    component: &Rc<Component>,
-    mut repeated_indices: Option<(&mut TokenStream, &mut TokenStream)>,
-) -> (TokenStream, TokenStream) {
-    let alignment = if let Some(expr) = &layout.geometry.alignment {
-        let p = access_named_reference(expr, component, quote!(_self));
-        quote!(#p.get())
-    } else {
-        quote!(::core::default::Default::default())
-    };
-
-    let repeater_count =
-        layout.elems.iter().filter(|i| i.element.borrow().repeated.is_some()).count();
-
-    if repeater_count == 0 {
-        let cells = layout.elems.iter().map(|li| {
-            let layout_info = get_layout_info(&li.element, component, &li.constraints, orientation);
-            quote!(BoxLayoutCellData { constraint: #layout_info })
-        });
-        if let Some((ri, _)) = &mut repeated_indices {
-            **ri = quote!([]);
-        }
-        (quote!([ #(#cells),* ]), alignment)
-    } else {
-        let mut fixed_count = 0usize;
-        let mut repeated_count = quote!();
-        let mut push_code = quote!();
-        let inner_component_id = inner_component_id(component);
-        if let Some((ri, init)) = &mut repeated_indices {
-            **ri = quote!(repeater_indices);
-            **init = quote!( let mut #ri = [ 0u32; #repeater_count * 2]; );
-        }
-        let mut repeater_idx = 0usize;
-        for item in &layout.elems {
-            if item.element.borrow().repeated.is_some() {
-                let repeater_id = format_ident!("repeater_{}", ident(&item.element.borrow().id));
-                let rep_inner_component_id =
-                    self::inner_component_id(item.element.borrow().base_type.as_component());
+    ctx: &EvaluationContext,
+) -> TokenStream {
+    let repeated_indices = repeated_indices.map(|x| ident(x));
+    let inner_component_id = self::inner_component_id(ctx.current_sub_component.unwrap());
+    let mut fixed_count = 0usize;
+    let mut repeated_count = quote!();
+    let mut push_code = vec![];
+    if let Some(ri) = &repeated_indices {
+        todo!()
+        //push_code.push()
+    }
+    let mut repeater_idx = 0usize;
+    for item in elements {
+        match item {
+            Either::Left(value) => {
+                let value = compile_expression(value, ctx);
+                fixed_count += 1;
+                push_code.push(quote!(items_vec.push(#value)))
+            }
+            Either::Right(repeater) => {
+                let repeater_id = format_ident!("repeater{}", repeater);
+                let rep_inner_component_id = self::inner_component_id(
+                    &ctx.current_sub_component.unwrap().repeated[*repeater].sub_tree.root,
+                );
                 repeated_count = quote!(#repeated_count + _self.#repeater_id.len());
-                let ri = repeated_indices.as_ref().map(|(ri, _)| {
+                let ri = repeated_indices.as_ref().map(|_| {
                     quote!(
-                        #ri[#repeater_idx * 2] = items_vec.len() as u32;
-                        #ri[#repeater_idx * 2 + 1] = internal_vec.len() as u32;
+                        todo!("repeated_indices") //#ri[#repeater_idx * 2] = items_vec.len() as u32;
+                                                  //#ri[#repeater_idx * 2 + 1] = internal_vec.len() as u32;
                     )
                 });
                 repeater_idx += 1;
-                let window_tokens = access_window_field(component, quote!(_self));
-                push_code = quote! {
-                    #push_code
-                    #inner_component_id::FIELD_OFFSETS.#repeater_id.apply_pin(_self).ensure_updated(
-                        || { #rep_inner_component_id::new(_self.self_weak.get().unwrap().clone(), &#window_tokens.window_handle()).into() }
-                    );
-                    let internal_vec = _self.#repeater_id.components_vec();
-                    #ri
-                    for sub_comp in &internal_vec {
-                        items_vec.push(sub_comp.as_pin_ref().box_layout_data(#orientation))
-                    }
-                }
-            } else {
-                let layout_info =
-                    get_layout_info(&item.element, component, &item.constraints, orientation);
-                fixed_count += 1;
-                push_code = quote! {
-                    #push_code
-                    items_vec.push(BoxLayoutCellData { constraint: #layout_info });
-                }
-            }
-        }
-        (
-            quote! { {
-                let mut items_vec = sixtyfps::re_exports::Vec::with_capacity(#fixed_count #repeated_count);
-                #push_code
-                items_vec
-            } },
-            alignment,
-        )
-    }
-}
-
-fn generate_layout_padding_and_spacing(
-    layout_geometry: &LayoutGeometry,
-    orientation: Orientation,
-    component: &Rc<Component>,
-) -> (TokenStream, TokenStream) {
-    let padding_prop = |expr| {
-        if let Some(expr) = expr {
-            let p = access_named_reference(expr, component, quote!(_self));
-            quote!(#p.get())
-        } else {
-            quote!(0.)
-        }
-    };
-    let spacing = padding_prop(layout_geometry.spacing.as_ref());
-    let (begin, end) = layout_geometry.padding.begin_end(orientation);
-    let (begin, end) = (padding_prop(begin), padding_prop(end));
-    let padding = quote!(&sixtyfps::re_exports::Padding { begin: #begin, end: #end });
-
-    (padding, spacing)
-}
-
-fn layout_geometry_size(
-    rect: &LayoutRect,
-    orientation: Orientation,
-    component: &Rc<Component>,
-) -> TokenStream {
-    let nr = rect.size_reference(orientation);
-    nr.map_or_else(
-        || quote!(::core::default::Default::default()),
-        |nr| {
-            let p = access_named_reference(nr, component, quote!(_self));
-            quote!(#p.get())
-        },
-    )
-}
-
-fn compute_layout(component: &Rc<Component>) -> TokenStream {
-    let elem = &component.root_element;
-    let constraints = component.root_constraints.borrow();
-    let layout_info_h = get_layout_info(elem, component, &constraints, Orientation::Horizontal);
-    let layout_info_v = get_layout_info(elem, component, &constraints, Orientation::Vertical);
-    let optional_window_parameter = if component.is_sub_component() {
-        Some(quote!(, _: &sixtyfps::re_exports::WindowRc))
-    } else {
-        None
-    };
-    quote! {
-        fn layout_info(self: ::core::pin::Pin<&Self>, orientation: sixtyfps::re_exports::Orientation #optional_window_parameter) -> sixtyfps::re_exports::LayoutInfo {
-            #![allow(unused)]
-            use sixtyfps::re_exports::*;
-            let _self = self;
-            match orientation {
-                sixtyfps::re_exports::Orientation::Horizontal => #layout_info_h,
-                sixtyfps::re_exports::Orientation::Vertical => #layout_info_v,
+                let window_tokens = access_window_field(ctx);
+                push_code.push(quote!(
+                        #inner_component_id::FIELD_OFFSETS.#repeater_id.apply_pin(_self).ensure_updated(
+                            || { #rep_inner_component_id::new(_self.self_weak.get().unwrap().clone(), &#window_tokens.window_handle()).into() }
+                        );
+                        let internal_vec = _self.#repeater_id.components_vec();
+                        #ri
+                        for sub_comp in &internal_vec {
+                            items_vec.push(sub_comp.as_pin_ref().box_layout_data(#orientation))
+                        }
+                    ));
             }
         }
     }
+
+    quote! { {
+        let mut items_vec = sixtyfps::re_exports::Vec::with_capacity(#fixed_count #repeated_count);
+        #(#push_code)*
+        items_vec
+    } }
 }
 
-fn get_layout_info(
-    elem: &ElementRc,
-    component: &Rc<Component>,
-    constraints: &crate::layout::LayoutConstraints,
-    orientation: Orientation,
-) -> TokenStream {
-    let layout_info = if let Some(layout_info_prop) = &elem.borrow().layout_info_prop(orientation) {
-        let li = access_named_reference(layout_info_prop, component, quote!(_self));
-        quote! {#li.get()}
-    } else {
-        let elem_id = ident(&elem.borrow().id);
-        let inner_component_id = inner_component_id(component);
-        let window_tokens = access_window_field(component, quote!(_self));
-        quote!(#inner_component_id::FIELD_OFFSETS.#elem_id.apply_pin(_self).layout_info(#orientation, &#window_tokens.window_handle()))
-    };
-
-    if constraints.has_explicit_restrictions() {
-        let (name, expr): (Vec<_>, Vec<_>) = constraints
-            .for_each_restrictions(orientation)
-            .map(|(e, s)| (ident(s), access_named_reference(e, component, quote!(_self))))
-            .unzip();
-        quote!({
-            let mut layout_info = #layout_info;
-                #(layout_info.#name = #expr.get();)*
-            layout_info
-        })
-    } else {
-        layout_info
-    }
-}
-
+/*
 fn compile_path_events(events: &[crate::expression_tree::PathEvent]) -> TokenStream {
     use lyon_path::Event;
 
@@ -2537,13 +2109,6 @@ fn access_component_field_offset(component_id: &Ident, field: &Ident) -> TokenSt
     quote!({ *&#component_id::FIELD_OFFSETS.#field })
 }
 
-fn access_window_field(component: &Rc<Component>, self_tokens: TokenStream) -> TokenStream {
-    if component.is_sub_component() {
-        quote!(#self_tokens.window.get().unwrap())
-    } else {
-        quote!(#self_tokens.window)
-    }
-}
 
 fn embedded_file_tokens(path: &str) -> TokenStream {
     let file = crate::fileaccess::load_file(std::path::Path::new(path)).unwrap(); // embedding pass ensured that the file exists
@@ -2555,3 +2120,4 @@ fn embedded_file_tokens(path: &str) -> TokenStream {
         None => quote!(::core::include_bytes!(#path)),
     }
 }
+*/
