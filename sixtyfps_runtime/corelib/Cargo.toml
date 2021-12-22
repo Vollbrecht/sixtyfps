@@ -3,7 +3,7 @@ name = "sixtyfps-corelib"
 version = "0.1.6"
 authors = ["SixtyFPS <info@sixtyfps.io>"]
 edition = "2018"
-license = "GPL-3.0-only"
+license = "(GPL-3.0-only OR LicenseRef-SixtyFPS-commercial)"
 description = "Internal SixtyFPS runtime library."
 repository = "https://github.com/sixtyfpsui/sixtyfps"
 homepage = "https://sixtyfps.io"
@@ -64,3 +64,4 @@ wasm-bindgen = { version = "0.2" }
 [dev-dependencies]
 pin-weak = "1"
 image = { version = "0.23.14", default-features = false, features = [ "png" ] }
+tiny-skia = "0.6.1"

@@ -1,12 +1,5 @@
-/* LICENSE BEGIN
-    This file is part of the SixtyFPS Project -- https://sixtyfps.io
-    Copyright (c) 2021 Olivier Goffart <olivier.goffart@sixtyfps.io>
-    Copyright (c) 2021 Simon Hausmann <simon.hausmann@sixtyfps.io>
-
-    SPDX-License-Identifier: GPL-3.0-only
-    This file is also available under commercial licensing terms.
-    Please contact info@sixtyfps.io for more information.
-LICENSE END */
+// Copyright © SixtyFPS GmbH <info@sixtyfps.io>
+// SPDX-License-Identifier: (GPL-3.0-only OR LicenseRef-SixtyFPS-commercial)
 
 // cspell:ignore corelib SFPS QWIDGETSIZE pixmap qpointf qreal Antialiasing ARGB Rgba
 
@@ -15,7 +8,8 @@ use euclid::approxeq::ApproxEq;
 use items::{ImageFit, TextHorizontalAlignment, TextVerticalAlignment};
 use qttypes::QPainter;
 use sixtyfps_corelib::graphics::{
-    Brush, FontRequest, Image, Point, Rect, RenderingCache, SharedImageBuffer, Size,
+    Brush, Color, FPSCounter, FontRequest, Image, Point, Rect, RenderingCache, SharedImageBuffer,
+    Size,
 };
 use sixtyfps_corelib::input::{KeyEvent, KeyEventType, MouseEvent};
 use sixtyfps_corelib::item_rendering::{CachedRenderingData, ItemRenderer};
@@ -814,6 +808,19 @@ impl ItemRenderer for QtItemRenderer<'_> {
         })
     }
 
+    fn draw_string(&mut self, string: &str, color: Color) {
+        let fill_brush: qttypes::QBrush = into_qbrush(color.into());
+        let mut string: qttypes::QString = string.into();
+        let font: QFont = get_font(self.default_font_properties.clone());
+        let painter: &mut QPainter = &mut *self.painter;
+        cpp! { unsafe [painter as "QPainter*", fill_brush as "QBrush", mut string as "QString", font as "QFont"] {
+            painter->setFont(font);
+            painter->setPen(QPen(fill_brush, 0));
+            painter->setBrush(Qt::NoBrush);
+            painter->drawText(0, QFontMetrics(painter->font()).ascent(), string);
+        }}
+    }
+
     fn window(&self) -> WindowRc {
         self.window.clone()
     }
@@ -1079,6 +1086,8 @@ pub struct QtWindow {
     widget_ptr: QWidgetPtr,
     pub(crate) self_weak: Weak<sixtyfps_corelib::window::Window>,
 
+    fps_counter: Option<Rc<FPSCounter>>,
+
     cache: QtRenderingCache,
 }
 
@@ -1091,6 +1100,7 @@ impl QtWindow {
         let rc = Rc::new(QtWindow {
             widget_ptr,
             self_weak: window_weak.clone(),
+            fps_counter: FPSCounter::new(),
             cache: Default::default(),
         });
         let self_weak = Rc::downgrade(&rc);
@@ -1126,6 +1136,10 @@ impl QtWindow {
                     &mut renderer,
                     origin.clone(),
                 );
+            }
+
+            if let Some(fps_counter) = &self.fps_counter {
+                fps_counter.measure_frame_rendered(&mut renderer);
             }
 
             sixtyfps_corelib::animations::CURRENT_ANIMATION_DRIVER.with(|driver| {
@@ -1202,6 +1216,12 @@ impl PlatformWindow for QtWindow {
         cpp! {unsafe [widget_ptr as "QWidget*"] {
             widget_ptr->show();
         }};
+        if let Some(fps_counter) = &self.fps_counter {
+            let qt_platform_name = cpp! {unsafe [] -> qttypes::QString as "QString" {
+                return QGuiApplication::platformName();
+            }};
+            fps_counter.start(&format!("Qt backend (platform {})", qt_platform_name));
+        }
     }
 
     fn hide(self: Rc<Self>) {

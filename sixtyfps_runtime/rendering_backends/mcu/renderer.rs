@@ -1,12 +1,5 @@
-/* LICENSE BEGIN
-    This file is part of the SixtyFPS Project -- https://sixtyfps.io
-    Copyright (c) 2021 Olivier Goffart <olivier.goffart@sixtyfps.io>
-    Copyright (c) 2021 Simon Hausmann <simon.hausmann@sixtyfps.io>
-
-    SPDX-License-Identifier: GPL-3.0-only
-    This file is also available under commercial licensing terms.
-    Please contact info@sixtyfps.io for more information.
-LICENSE END */
+// Copyright © SixtyFPS GmbH <info@sixtyfps.io>
+// SPDX-License-Identifier: (GPL-3.0-only OR LicenseRef-SixtyFPS-commercial)
 
 use alloc::collections::VecDeque;
 use alloc::rc::Rc;
@@ -533,6 +526,10 @@ impl sixtyfps_corelib::item_rendering::ItemRenderer for PrepareScene {
         _item_cache: &sixtyfps_corelib::item_rendering::CachedRenderingData,
         _update_fn: &dyn Fn(&mut dyn FnMut(u32, u32, &[u8])),
     ) {
+        todo!()
+    }
+
+    fn draw_string(&mut self, _string: &str, _color: Color) {
         todo!()
     }
 

@@ -1,12 +1,6 @@
-/* LICENSE BEGIN
-    This file is part of the SixtyFPS Project -- https://sixtyfps.io
-    Copyright (c) 2021 Olivier Goffart <olivier.goffart@sixtyfps.io>
-    Copyright (c) 2021 Simon Hausmann <simon.hausmann@sixtyfps.io>
+// Copyright © SixtyFPS GmbH <info@sixtyfps.io>
+// SPDX-License-Identifier: (GPL-3.0-only OR LicenseRef-SixtyFPS-commercial)
 
-    SPDX-License-Identifier: GPL-3.0-only
-    This file is also available under commercial licensing terms.
-    Please contact info@sixtyfps.io for more information.
-LICENSE END */
 #![warn(missing_docs)]
 /*!
     Graphics Abstractions.
@@ -47,6 +41,11 @@ pub use brush::*;
 
 pub(crate) mod image;
 pub use self::image::*;
+
+#[cfg(feature = "std")]
+mod fps_counter;
+#[cfg(feature = "std")]
+pub use fps_counter::*;
 
 /// CachedGraphicsData allows the graphics backend to store an arbitrary piece of data associated with
 /// an item, which is typically computed by accessing properties. The dependency_tracker is used to allow

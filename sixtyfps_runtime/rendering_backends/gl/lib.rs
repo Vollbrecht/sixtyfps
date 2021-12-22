@@ -1,12 +1,6 @@
-/* LICENSE BEGIN
-    This file is part of the SixtyFPS Project -- https://sixtyfps.io
-    Copyright (c) 2021 Olivier Goffart <olivier.goffart@sixtyfps.io>
-    Copyright (c) 2021 Simon Hausmann <simon.hausmann@sixtyfps.io>
+// Copyright © SixtyFPS GmbH <info@sixtyfps.io>
+// SPDX-License-Identifier: (GPL-3.0-only OR LicenseRef-SixtyFPS-commercial)
 
-    SPDX-License-Identifier: GPL-3.0-only
-    This file is also available under commercial licensing terms.
-    Please contact info@sixtyfps.io for more information.
-LICENSE END */
 /*!
 
 **NOTE**: This library is an **internal** crate for the [SixtyFPS project](https://sixtyfps.io).
@@ -758,6 +752,19 @@ impl ItemRenderer for GLItemRenderer {
         let mut path = femtovg::Path::new();
         path.rect(0., 0., width, height);
         canvas.fill_path(&mut path, fill_paint);
+    }
+
+    fn draw_string(&mut self, string: &str, color: Color) {
+        let font = fonts::FONT_CACHE.with(|cache| {
+            cache.borrow_mut().font(
+                self.graphics_window.default_font_properties(),
+                self.scale_factor,
+                &string,
+            )
+        });
+        let paint = font.init_paint(0.0, femtovg::Paint::color(to_femtovg_color(&color)));
+        let mut canvas = self.canvas.borrow_mut();
+        canvas.fill_text(0., 0., string, paint).unwrap();
     }
 
     fn window(&self) -> WindowRc {

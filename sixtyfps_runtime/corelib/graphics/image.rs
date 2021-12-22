@@ -1,12 +1,5 @@
-/* LICENSE BEGIN
-    This file is part of the SixtyFPS Project -- https://sixtyfps.io
-    Copyright (c) 2021 Olivier Goffart <olivier.goffart@sixtyfps.io>
-    Copyright (c) 2021 Simon Hausmann <simon.hausmann@sixtyfps.io>
-
-    SPDX-License-Identifier: GPL-3.0-only
-    This file is also available under commercial licensing terms.
-    Please contact info@sixtyfps.io for more information.
-LICENSE END */
+// Copyright © SixtyFPS GmbH <info@sixtyfps.io>
+// SPDX-License-Identifier: (GPL-3.0-only OR LicenseRef-SixtyFPS-commercial)
 
 use crate::slice::Slice;
 use crate::{SharedString, SharedVector};
@@ -310,6 +303,36 @@ pub struct LoadImageError(());
 /// let image = Image::from_rgba8(buffer);
 /// ```
 ///
+/// A popular software (CPU) rendering library in Rust is tiny-skia. The following example shows
+/// how to use tiny-skia to render into a [`SharedPixelBuffer`]:
+/// ```
+/// # use sixtyfps_corelib::graphics::{SharedPixelBuffer, Image, Rgba8Pixel};
+/// let mut pixel_buffer = SharedPixelBuffer::<Rgba8Pixel>::new(640, 480);
+/// let width = pixel_buffer.width();
+/// let height = pixel_buffer.height();
+/// let mut pixmap = tiny_skia::PixmapMut::from_bytes(
+///     pixel_buffer.make_mut_bytes(), width as _, height as _
+/// ).unwrap();
+/// pixmap.fill(tiny_skia::Color::TRANSPARENT);
+///
+/// let circle = tiny_skia::PathBuilder::from_circle(320., 240., 150.).unwrap();
+///
+/// let mut paint = tiny_skia::Paint::default();
+/// paint.shader = tiny_skia::LinearGradient::new(
+///     tiny_skia::Point::from_xy(100.0, 100.0),
+///     tiny_skia::Point::from_xy(400.0, 400.0),
+///     vec![
+///         tiny_skia::GradientStop::new(0.0, tiny_skia::Color::from_rgba8(50, 127, 150, 200)),
+///         tiny_skia::GradientStop::new(1.0, tiny_skia::Color::from_rgba8(220, 140, 75, 180)),
+///     ],
+///     tiny_skia::SpreadMode::Pad,
+///     tiny_skia::Transform::identity(),
+/// ).unwrap();
+///
+/// pixmap.fill_path(&circle, &paint, tiny_skia::FillRule::Winding, Default::default(), None);
+///
+/// let image = Image::from_rgba8_premultiplied(pixel_buffer);
+/// ```
 #[repr(transparent)]
 #[derive(Default, Clone, Debug, PartialEq, derive_more::From)]
 pub struct Image(ImageInner);

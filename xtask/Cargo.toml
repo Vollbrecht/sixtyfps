@@ -3,10 +3,11 @@ name = "xtask"
 version = "0.1.6"
 authors = ["SixtyFPS <info@sixtyfps.io>"]
 edition = "2018"
-license = "GPL-3.0-only"
+license = "(GPL-3.0-only OR LicenseRef-SixtyFPS-commercial)"
 publish = false
 
 [dependencies]
+const_format = "0.2"
 structopt = "0.3.14"
 cargo_metadata = "0.14"
 anyhow = "1.0"

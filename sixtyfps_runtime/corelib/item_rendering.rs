@@ -1,12 +1,6 @@
-/* LICENSE BEGIN
-    This file is part of the SixtyFPS Project -- https://sixtyfps.io
-    Copyright (c) 2021 Olivier Goffart <olivier.goffart@sixtyfps.io>
-    Copyright (c) 2021 Simon Hausmann <simon.hausmann@sixtyfps.io>
+// Copyright © SixtyFPS GmbH <info@sixtyfps.io>
+// SPDX-License-Identifier: (GPL-3.0-only OR LicenseRef-SixtyFPS-commercial)
 
-    SPDX-License-Identifier: GPL-3.0-only
-    This file is also available under commercial licensing terms.
-    Please contact info@sixtyfps.io for more information.
-LICENSE END */
 #![warn(missing_docs)]
 //! module for rendering the tree of items
 
@@ -177,6 +171,10 @@ pub trait ItemRenderer {
         item_cache: &CachedRenderingData,
         update_fn: &dyn Fn(&mut dyn FnMut(u32, u32, &[u8])),
     );
+
+    // Draw the given string with the specified color at current (0, 0) with the default font. Mainly
+    // used by the performance counter overlay.
+    fn draw_string(&mut self, string: &str, color: crate::Color);
 
     fn window(&self) -> crate::window::WindowRc;
 

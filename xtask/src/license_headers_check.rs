@@ -1,12 +1,6 @@
-/* LICENSE BEGIN
-    This file is part of the SixtyFPS Project -- https://sixtyfps.io
-    Copyright (c) 2021 Olivier Goffart <olivier.goffart@sixtyfps.io>
-    Copyright (c) 2021 Simon Hausmann <simon.hausmann@sixtyfps.io>
+// Copyright © SixtyFPS GmbH <info@sixtyfps.io>
+// SPDX-License-Identifier: (GPL-3.0-only OR LicenseRef-SixtyFPS-commercial)
 
-    SPDX-License-Identifier: GPL-3.0-only
-    This file is also available under commercial licensing terms.
-    Please contact info@sixtyfps.io for more information.
-LICENSE END */
 use anyhow::Context;
 use anyhow::Result;
 use lazy_static::lazy_static;
@@ -25,28 +19,28 @@ struct LicenseTagStyle {
 impl LicenseTagStyle {
     fn c_style_comment_style() -> Self {
         Self {
-            tag_start: "/* LICENSE BEGIN\n",
-            line_prefix: "",
-            line_indentation: "    ",
-            tag_end: "LICENSE END */\n",
+            tag_start: "// Copyright © ",
+            line_prefix: "//",
+            line_indentation: " ",
+            tag_end: const_format::concatcp!("// ", EXPECTED_SPDX_ID, '\n'),
         }
     }
 
     fn shell_comment_style() -> Self {
         Self {
-            tag_start: "# LICENSE BEGIN\n",
+            tag_start: "# Copyright © ",
             line_prefix: "#",
             line_indentation: " ",
-            tag_end: "# LICENSE END\n",
+            tag_end: const_format::concatcp!("# ", EXPECTED_SPDX_ID, '\n'),
         }
     }
 
     fn rst_comment_style() -> Self {
         Self {
-            tag_start: ".. LICENSE BEGIN\n",
+            tag_start: ".. Copyright © ",
             line_prefix: "..",
-            line_indentation: "    ",
-            tag_end: ".. LICENSE END\n",
+            line_indentation: " ",
+            tag_end: const_format::concatcp!(".. ", EXPECTED_SPDX_ID, '\n'),
         }
     }
 }
@@ -102,9 +96,21 @@ impl<'a> SourceFileWithTags<'a> {
     }
 
     fn replace_tag(&self, replacement: &LicenseHeader) -> String {
-        let new_header = replacement.to_string(self.tag_style);
+        let loc = &self.tag_location;
+        let next_char = if let Some(range) = loc {
+            self.source.as_bytes().get(range.end)
+        } else {
+            self.source.as_bytes().get(0)
+        };
 
-        match &self.tag_location {
+        let new_header = replacement.to_string(self.tag_style);
+        let new_header = if next_char == Some(&b'\n') || next_char.is_none() {
+            new_header
+        } else {
+            format!("{}\n", new_header)
+        };
+
+        match loc {
             Some(loc) => {
                 self.source[0..loc.start].to_string() + &new_header + &self.source[loc.end..]
             }
@@ -117,33 +123,67 @@ impl<'a> SourceFileWithTags<'a> {
 fn test_license_tag_c_style() {
     let style = LicenseTagStyle::c_style_comment_style();
     {
-        let test_source = SourceFileWithTags::new(
-            r#"/* LICENSE BEGIN
-        foobar
-        LICENSE END */
-
+        let source = format!(
+            r#"// Copyright © something <bar@something.com>
+foobar
+// SPDX-License-Identifier: {}
 blah"#,
-            &style,
+            EXPECTED_SPDX_EXPRESSION
         );
+        let test_source = SourceFileWithTags::new(&source, &style);
         assert_eq!(
             test_source.replace_tag(&LicenseHeader(&["TEST_LICENSE"])),
-            r#"/* LICENSE BEGIN
-    TEST_LICENSE
-LICENSE END */
+            r#"// TEST_LICENSE
 
 blah"#
                 .to_string()
         );
     }
     {
-        let test_source = SourceFileWithTags::new(r#"blah"#, &style);
+        let source = format!(
+            r#"// Copyright © something <bar@something.com>
+foobar
+// SPDX-License-Identifier: {}
+
+blah"#,
+            EXPECTED_SPDX_EXPRESSION
+        );
+        let test_source = SourceFileWithTags::new(&source, &style);
         assert_eq!(
             test_source.replace_tag(&LicenseHeader(&["TEST_LICENSE"])),
-            r#"/* LICENSE BEGIN
-    TEST_LICENSE
-LICENSE END */
+            r#"// TEST_LICENSE
+
 blah"#
                 .to_string()
+        );
+    }
+    {
+        let test_source = SourceFileWithTags::new("blah", &style);
+        assert_eq!(
+            test_source.replace_tag(&LicenseHeader(&["TEST_LICENSE"])),
+            r#"// TEST_LICENSE
+
+blah"#
+                .to_string()
+        );
+    }
+    {
+        let test_source = SourceFileWithTags::new("\nblah", &style);
+        assert_eq!(
+            test_source.replace_tag(&LicenseHeader(&["TEST_LICENSE"])),
+            r#"// TEST_LICENSE
+
+blah"#
+                .to_string()
+        );
+    }
+    {
+        let test_source = SourceFileWithTags::new("", &style);
+        assert_eq!(
+            test_source.replace_tag(&LicenseHeader(&["TEST_LICENSE"])),
+            r#"// TEST_LICENSE
+"#
+            .to_string()
         );
     }
 }
@@ -152,19 +192,18 @@ blah"#
 fn test_license_tag_hash() {
     let style = LicenseTagStyle::shell_comment_style();
     {
-        let test_source = SourceFileWithTags::new(
-            r#"# LICENSE BEGIN
-# Some Text
-# LICENSE END
+        let source = format!(
+            r#"# Copyright © something <bar@something.com>
+foobar
+# SPDX-License-Identifier: {}
 
 blah"#,
-            &style,
+            EXPECTED_SPDX_EXPRESSION
         );
+        let test_source = SourceFileWithTags::new(&source, &style);
         assert_eq!(
             test_source.replace_tag(&LicenseHeader(&["TEST_LICENSE"])),
-            r#"# LICENSE BEGIN
-# TEST_LICENSE
-# LICENSE END
+            r#"# TEST_LICENSE
 
 blah"#
                 .to_string()
@@ -174,9 +213,41 @@ blah"#
         let test_source = SourceFileWithTags::new(r#"blah"#, &style);
         assert_eq!(
             test_source.replace_tag(&LicenseHeader(&["TEST_LICENSE"])),
-            r#"# LICENSE BEGIN
-# TEST_LICENSE
-# LICENSE END
+            r#"# TEST_LICENSE
+
+blah"#
+                .to_string()
+        );
+    }
+}
+
+#[test]
+fn test_license_tag_dotdot() {
+    let style = LicenseTagStyle::rst_comment_style();
+    {
+        let source = format!(
+            r#".. Copyright © something <bar@something.com>
+foobar
+.. SPDX-License-Identifier: {}
+
+blah"#,
+            EXPECTED_SPDX_EXPRESSION
+        );
+        let test_source = SourceFileWithTags::new(&source, &style);
+        assert_eq!(
+            test_source.replace_tag(&LicenseHeader(&["TEST_LICENSE"])),
+            r#".. TEST_LICENSE
+
+blah"#
+                .to_string()
+        );
+    }
+    {
+        let test_source = SourceFileWithTags::new(r#"blah"#, &style);
+        assert_eq!(
+            test_source.replace_tag(&LicenseHeader(&["TEST_LICENSE"])),
+            r#".. TEST_LICENSE
+
 blah"#
                 .to_string()
         );
@@ -252,7 +323,7 @@ pub struct LicenseHeader<'a>(&'a [&'a str]);
 
 impl<'a> LicenseHeader<'a> {
     fn to_string(&self, style: &LicenseTagStyle) -> String {
-        let mut result = style.tag_start.to_string();
+        let mut result = String::new();
         for line in self.0 {
             result += style.line_prefix;
             if !line.is_empty() {
@@ -261,23 +332,16 @@ impl<'a> LicenseHeader<'a> {
             result += line;
             result += "\n";
         }
-        result += style.tag_end;
         result
     }
 }
 
-const EXPECTED_SPDX_EXPRESSION: &str = "GPL-3.0-only";
-const EXPECTED_SPDX_ID: &str = "SPDX-License-Identifier: GPL-3.0-only";
+const EXPECTED_SPDX_EXPRESSION: &str = "(GPL-3.0-only OR LicenseRef-SixtyFPS-commercial)";
+const EXPECTED_SPDX_ID: &str =
+    const_format::concatcp!("SPDX-License-Identifier: ", EXPECTED_SPDX_EXPRESSION);
 
-const EXPECTED_HEADER: LicenseHeader<'static> = LicenseHeader(&[
-    "This file is part of the SixtyFPS Project -- https://sixtyfps.io",
-    "Copyright (c) 2021 Olivier Goffart <olivier.goffart@sixtyfps.io>",
-    "Copyright (c) 2021 Simon Hausmann <simon.hausmann@sixtyfps.io>",
-    "",
-    EXPECTED_SPDX_ID,
-    "This file is also available under commercial licensing terms.",
-    "Please contact info@sixtyfps.io for more information.",
-]);
+const EXPECTED_HEADER: LicenseHeader<'static> =
+    LicenseHeader(&["Copyright © SixtyFPS GmbH <info@sixtyfps.io>", EXPECTED_SPDX_ID]);
 
 const EXPECTED_HOMEPAGE: &str = "https://sixtyfps.io";
 const EXPECTED_REPOSITORY: &str = "https://github.com/sixtyfpsui/sixtyfps";
@@ -566,7 +630,7 @@ impl LicenseHeaderCheck {
         let location = LICENSE_LOCATION_FOR_FILE
             .iter()
             .find_map(|(regex, style)| if regex.is_match(path_str) { Some(style) } else { None })
-            .with_context(|| "Cannot determine the expected license header style. Please the license checking xtask.")?;
+            .with_context(|| "Cannot determine the expected license header style. Please fix the license checking xtask.")?;
 
         match location {
             LicenseLocation::Tag(tag_style) => self.check_file_tags(path, tag_style),
