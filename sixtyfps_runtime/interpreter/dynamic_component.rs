@@ -178,22 +178,13 @@ impl Component for ErasedComponentBox {
 
 sixtyfps_corelib::ComponentVTable_static!(static COMPONENT_BOX_VT for ErasedComponentBox);
 
+#[derive(Default)]
 pub(crate) struct ComponentExtraData {
     pub(crate) globals: HashMap<String, Pin<Rc<dyn crate::global_component::GlobalComponent>>>,
     pub(crate) self_weak:
         once_cell::unsync::OnceCell<vtable::VWeak<ComponentVTable, ErasedComponentBox>>,
     // resource id -> file path
     pub(crate) embedded_file_resources: HashMap<usize, String>,
-}
-
-impl Default for ComponentExtraData {
-    fn default() -> Self {
-        Self {
-            globals: HashMap::new(),
-            self_weak: Default::default(),
-            embedded_file_resources: Default::default(),
-        }
-    }
 }
 
 struct ErasedRepeaterWithinComponent<'id>(RepeaterWithinComponent<'id, 'static>);
@@ -1125,14 +1116,13 @@ pub fn instantiate(
         extra_data.globals = component_type
             .compiled_globals
             .iter()
-            .map(|g| {
+            .flat_map(|g| {
                 let (_, instance) = crate::global_component::instantiate(g);
                 g.names()
                     .iter()
                     .map(|name| (crate::normalize_identifier(name).to_string(), instance.clone()))
                     .collect::<Vec<_>>()
             })
-            .flatten()
             .collect();
 
         extra_data.embedded_file_resources = component_type

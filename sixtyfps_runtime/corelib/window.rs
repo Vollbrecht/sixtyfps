@@ -247,7 +247,7 @@ impl Window {
 
                 if let MouseEvent::MousePressed { pos, .. } = &event {
                     // close the popup if one press outside the popup
-                    let geom = ComponentRc::borrow_pin(&popup_component)
+                    let geom = ComponentRc::borrow_pin(popup_component)
                         .as_ref()
                         .get_item_ref(0)
                         .as_ref()
@@ -409,7 +409,7 @@ impl Window {
         };
 
         if let Some(redraw_tracker) = self.redraw_tracker.get() {
-            redraw_tracker.as_ref().evaluate_as_dependency_root(|| draw_fn())
+            redraw_tracker.as_ref().evaluate_as_dependency_root(draw_fn)
         } else {
             draw_fn()
         }

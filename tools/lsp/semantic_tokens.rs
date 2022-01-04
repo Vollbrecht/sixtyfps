@@ -101,23 +101,25 @@ pub fn get_semantic_tokens(
                 SyntaxKind::Transition => Some((self::KEYWORD, 0)),
                 SyntaxKind::ExportsList => Some((self::KEYWORD, 0)),
                 SyntaxKind::ExportSpecifier => Some((self::KEYWORD, 0)),
-                SyntaxKind::ExportIdentifier => Some((
-                    self::TYPE,
-                    if token.parent()?.parent().map_or(false, |p| {
-                        p.children().find(|n| n.kind() == SyntaxKind::ExportName).is_some()
-                    }) {
-                        0
-                    } else {
-                        1 << self::DECLARATION
-                    },
-                )),
+                SyntaxKind::ExportIdentifier => {
+                    Some((
+                        self::TYPE,
+                        if token.parent()?.parent().map_or(false, |p| {
+                            p.children().any(|n| n.kind() == SyntaxKind::ExportName)
+                        }) {
+                            0
+                        } else {
+                            1 << self::DECLARATION
+                        },
+                    ))
+                }
                 SyntaxKind::ExportName => Some((self::TYPE, 1 << self::DECLARATION)),
                 SyntaxKind::ImportSpecifier => Some((self::KEYWORD, 0)),
                 SyntaxKind::ImportIdentifier => Some((self::KEYWORD, 0)),
                 SyntaxKind::ExternalName => Some((
                     self::TYPE,
                     if token.parent()?.parent().map_or(false, |p| {
-                        p.children().find(|n| n.kind() == SyntaxKind::InternalName).is_some()
+                        p.children().any(|n| n.kind() == SyntaxKind::InternalName)
                     }) {
                         0
                     } else {

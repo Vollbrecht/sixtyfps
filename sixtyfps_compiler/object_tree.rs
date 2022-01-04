@@ -282,7 +282,7 @@ impl Component {
         self.exported_global_names
             .borrow()
             .iter()
-            .filter(|name| name.as_str() != &self.root_element.borrow().id)
+            .filter(|name| name.as_str() != self.root_element.borrow().id)
             .map(|name| name.original_name())
             .collect()
     }
@@ -1232,10 +1232,7 @@ pub fn type_from_node(
         let prop_type = tr.lookup_qualified(&qualified_type.members);
 
         if prop_type == Type::Invalid {
-            diag.push_error(
-                format!("Unknown type '{}'", qualified_type.to_string()),
-                &qualified_type_node,
-            );
+            diag.push_error(format!("Unknown type '{}'", qualified_type), &qualified_type_node);
         }
         prop_type
     } else if let Some(object_node) = node.ObjectType() {
@@ -1482,7 +1479,7 @@ pub fn recurse_elem_including_sub_components_no_borrow<State>(
         .borrow()
         .globals
         .iter()
-        .for_each(|p| recurse_elem_including_sub_components_no_borrow(&p, state, vis));
+        .for_each(|p| recurse_elem_including_sub_components_no_borrow(p, state, vis));
 }
 
 /// This visit the binding attached to this element, but does not recurse in children elements
@@ -1716,7 +1713,7 @@ impl Exports {
                         parser::identifier_text(&ident).map(|text| (text, ident.clone().into()))
                     })
                     .unwrap_or_else(|| {
-                        (internal_name.clone(), export_specifier.ExportIdentifier().clone().into())
+                        (internal_name.clone(), export_specifier.ExportIdentifier().into())
                     });
 
                 NamedExport {
