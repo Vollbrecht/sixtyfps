@@ -10,7 +10,6 @@ There is one sub module for every language
 use std::collections::{BTreeSet, HashSet, VecDeque};
 use std::rc::{Rc, Weak};
 
-use crate::diagnostics::BuildDiagnostics;
 use crate::expression_tree::{BindingExpression, Expression};
 use crate::langtype::Type;
 use crate::namedreference::NamedReference;
@@ -29,6 +28,7 @@ pub enum OutputFormat {
     #[cfg(feature = "rust")]
     Rust,
     Interpreter,
+    Llr,
 }
 
 impl OutputFormat {
@@ -51,6 +51,7 @@ impl std::str::FromStr for OutputFormat {
             "cpp" => Ok(Self::Cpp),
             #[cfg(feature = "rust")]
             "rust" => Ok(Self::Rust),
+            "llr" => Ok(Self::Llr),
             _ => Err(format!("Unknown outpout format {}", s)),
         }
     }
@@ -60,7 +61,6 @@ pub fn generate(
     format: OutputFormat,
     destination: &mut impl std::io::Write,
     doc: &Document,
-    diag: &mut BuildDiagnostics,
 ) -> std::io::Result<()> {
     #![allow(unused_variables)]
     #![allow(unreachable_code)]
@@ -73,21 +73,26 @@ pub fn generate(
     match format {
         #[cfg(feature = "cpp")]
         OutputFormat::Cpp => {
-            if let Some(output) = cpp::generate(doc, diag) {
-                write!(destination, "{}", output)?;
-            }
+            let output = cpp::generate(doc);
+            write!(destination, "{}", output)?;
         }
         #[cfg(feature = "rust")]
         OutputFormat::Rust => {
-            if let Some(output) = rust::generate(doc, diag) {
-                write!(destination, "{}", output)?;
-            }
+            let output = rust::generate(doc);
+            write!(destination, "{}", output)?;
         }
         OutputFormat::Interpreter => {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::Other,
                 "Unsupported output format: The interpreter is not a valid output format yet.",
             )); // Perhaps byte code in the future?
+        }
+        OutputFormat::Llr => {
+            writeln!(
+                destination,
+                "{:#?}",
+                crate::llr::lower_to_item_tree::lower_to_item_tree(&doc.root_component)
+            )?;
         }
     }
     Ok(())
@@ -313,7 +318,6 @@ pub fn build_item_tree<T: ItemTreeBuilder>(
         if item.borrow().repeated.is_some() {
             builder.push_repeated_item(item, *repeater_count, parent_index, component_state);
             *repeater_count += 1;
-            return;
         } else {
             let mut item = item.clone();
             let mut component_state = component_state.clone();

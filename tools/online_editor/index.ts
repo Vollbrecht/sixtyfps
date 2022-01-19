@@ -2,9 +2,33 @@
 // SPDX-License-Identifier: (GPL-3.0-only OR LicenseRef-SixtyFPS-commercial)
 
 import { sixtyfps_language } from "./highlighting";
-import type * as monaco from 'monaco-editor';
+
+import 'monaco-editor/esm/vs/editor/editor.all.js';
+import 'monaco-editor/esm/vs/editor/standalone/browser/accessibilityHelp/accessibilityHelp.js';
+import 'monaco-editor/esm/vs/editor/standalone/browser/iPadShowKeyboard/iPadShowKeyboard.js';
+import 'monaco-editor/esm/vs/editor/standalone/browser/inspectTokens/inspectTokens.js';
+import 'monaco-editor/esm/vs/editor/standalone/browser/quickAccess/standaloneHelpQuickAccess.js';
+import 'monaco-editor/esm/vs/editor/standalone/browser/quickAccess/standaloneGotoLineQuickAccess.js';
+import 'monaco-editor/esm/vs/editor/standalone/browser/quickAccess/standaloneGotoSymbolQuickAccess.js';
+import 'monaco-editor/esm/vs/editor/standalone/browser/quickAccess/standaloneCommandsQuickAccess.js';
+import 'monaco-editor/esm/vs/editor/standalone/browser/referenceSearch/standaloneReferenceSearch.js';
+
+import * as monaco from 'monaco-editor/esm/vs/editor/editor.api';
+
+import editorWorker from 'monaco-editor/esm/vs/editor/editor.worker?worker';
+
+
+self.MonacoEnvironment = {
+    getWorker(_, label) {
+        return new editorWorker();
+    }
+};
+
+import sixtyfps_init, * as sixtyfps from "../../../wasm-interpreter/sixtyfps_wasm_interpreter.js";
+
+
 (async function () {
-    let [monaco, sixtyfps] = await Promise.all([import('monaco-editor'), import("../../api/sixtyfps-wasm-interpreter/pkg/index.js")]);
+    await sixtyfps_init();
 
     monaco.languages.register({
         id: 'sixtyfps'

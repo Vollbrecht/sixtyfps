@@ -245,8 +245,7 @@ impl Expression {
                             format!(
                                 "'{}' must be called. Did you forgot the '()'?",
                                 QualifiedTypeName::from_node(n.clone())
-                            )
-                            .into(),
+                            ),
                             &n,
                         )
                     }
@@ -288,6 +287,8 @@ impl Expression {
             .or_else(|| {
                 node.FunctionCallExpression().map(|n| Self::from_function_call_node(n, ctx))
             })
+            .or_else(|| node.MemberAccess().map(|n| Self::from_member_access_node(n, ctx)))
+            .or_else(|| node.IndexExpression().map(|n| Self::from_index_expression_node(n, ctx)))
             .or_else(|| node.SelfAssignment().map(|n| Self::from_self_assignment_node(n, ctx)))
             .or_else(|| node.BinaryExpression().map(|n| Self::from_binary_expression_node(n, ctx)))
             .or_else(|| {
@@ -547,12 +548,12 @@ impl Expression {
                                 ),
                                 &next_identifier,
                             );
-                            return Expression::Invalid;
+                            Expression::Invalid
                         }
                     }
                 } else {
                     ctx.diag.push_error("Cannot take reference to an enum".to_string(), &node);
-                    return Expression::Invalid;
+                    Expression::Invalid
                 }
             }
             LookupResult::Expression { expression, .. } => maybe_lookup_object(expression, it, ctx),
@@ -573,12 +574,12 @@ impl Expression {
                                 ),
                                 &next_identifier,
                             );
-                            return Expression::Invalid;
+                            Expression::Invalid
                         }
                     }
                 } else {
                     ctx.diag.push_error("Cannot take reference to a namespace".to_string(), &node);
-                    return Expression::Invalid;
+                    Expression::Invalid
                 }
             }
         }
@@ -592,22 +593,27 @@ impl Expression {
 
         let mut sub_expr = node.Expression();
 
-        let function = sub_expr
-            .next()
-            .and_then(|n| {
-                n.QualifiedName().or_else(|| {
+        let function = sub_expr.next().map_or(Self::Invalid, |n| {
+            // Treat the QualifiedName separately so we can catch the uses of uncalled signal
+            n.QualifiedName()
+                .or_else(|| {
                     n.Expression().and_then(|mut e| {
                         while let Some(e2) = e.Expression() {
                             e = e2;
                         }
                         e.QualifiedName().map(|q| {
-                            ctx.diag.push_warning("Parentheses around callable are deprecated. Remove the parentheses".into(), &n);
+                            ctx.diag.push_warning(
+                            "Parentheses around callable are deprecated. Remove the parentheses"
+                                .into(),
+                            &n,
+                        );
                             q
                         })
                     })
                 })
-            })
-            .map_or(Expression::Invalid, |n| Self::from_qualified_name_node(n, ctx));
+                .map(|qn| Self::from_qualified_name_node(qn, ctx))
+                .unwrap_or_else(|| Self::from_expression_node(n, ctx))
+        });
 
         let sub_expr = sub_expr.map(|n| {
             (Self::from_expression_node(n.clone(), ctx), Some(NodeOrToken::from((*n).clone())))
@@ -657,6 +663,14 @@ impl Expression {
             arguments,
             source_location: Some(node.to_source_location()),
         }
+    }
+
+    fn from_member_access_node(
+        node: syntax_nodes::MemberAccess,
+        ctx: &mut LookupCtx,
+    ) -> Expression {
+        let base = Self::from_expression_node(node.Expression(), ctx);
+        maybe_lookup_object(base, node.child_token(SyntaxKind::Identifier).into_iter(), ctx)
     }
 
     fn from_self_assignment_node(
@@ -837,6 +851,25 @@ impl Expression {
             true_expr: Box::new(true_expr),
             false_expr: Box::new(false_expr),
         }
+    }
+
+    fn from_index_expression_node(
+        node: syntax_nodes::IndexExpression,
+        ctx: &mut LookupCtx,
+    ) -> Expression {
+        let (array_expr_n, index_expr_n) = node.Expression();
+        let array_expr = Self::from_expression_node(array_expr_n, ctx);
+        let index_expr = Self::from_expression_node(index_expr_n.clone(), ctx).maybe_convert_to(
+            Type::Int32,
+            &index_expr_n,
+            &mut ctx.diag,
+        );
+
+        let ty = array_expr.ty();
+        if !matches!(ty, Type::Array(_) | Type::Invalid) {
+            ctx.diag.push_error(format!("{} is not an indexable type", ty), &node);
+        }
+        Expression::ArrayIndex { array: Box::new(array_expr), index: Box::new(index_expr) }
     }
 
     fn from_object_literal_node(

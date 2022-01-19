@@ -354,6 +354,23 @@ fn process_window_event(
     cursor_pos: &mut Point,
     pressed: &mut bool,
 ) {
+    fn key_event(
+        event_type: KeyEventType,
+        text: SharedString,
+        modifiers: KeyboardModifiers,
+    ) -> KeyEvent {
+        let mut event = KeyEvent { event_type, text, modifiers };
+
+        let tab = String::from(corelib::input::key_codes::Tab);
+
+        // map Shift-Tab into (Shift) Backtab to have a similar behavior as Qt backend
+        if event.text == tab && modifiers.shift {
+            event.text = SharedString::from(String::from(corelib::input::key_codes::Backtab));
+        }
+
+        event
+    }
+
     let runtime_window = window.runtime_window();
     match event {
         WindowEvent::Resized(size) => {
@@ -389,7 +406,8 @@ fn process_window_event(
 
             let modifiers = window.current_keyboard_modifiers().get();
 
-            let mut event = KeyEvent { event_type: KeyEventType::KeyPressed, text, modifiers };
+            let mut event = key_event(KeyEventType::KeyPressed, text, modifiers);
+
             runtime_window.clone().process_key_input(&event);
             event.event_type = KeyEventType::KeyReleased;
             runtime_window.process_key_input(&event);
@@ -403,18 +421,18 @@ fn process_window_event(
         WindowEvent::KeyboardInput { ref input, .. } => {
             corelib::animations::update_animations();
             window.currently_pressed_key_code().set(match input.state {
-                winit::event::ElementState::Pressed => input.virtual_keycode.clone(),
+                winit::event::ElementState::Pressed => input.virtual_keycode,
                 _ => None,
             });
             if let Some(text) = input.virtual_keycode.and_then(key_codes::winit_key_to_string) {
-                let event = KeyEvent {
-                    event_type: match input.state {
+                let event = key_event(
+                    match input.state {
                         winit::event::ElementState::Pressed => KeyEventType::KeyPressed,
                         winit::event::ElementState::Released => KeyEventType::KeyReleased,
                     },
                     text,
-                    modifiers: window.current_keyboard_modifiers().get(),
-                };
+                    window.current_keyboard_modifiers().get(),
+                );
                 runtime_window.process_key_input(&event);
             };
         }
@@ -582,13 +600,12 @@ pub fn run(quit_behavior: sixtyfps_corelib::backend::EventLoopQuitBehavior) {
                 _ => (),
             }
 
-            if *control_flow != winit::event_loop::ControlFlow::Exit {
-                if corelib::animations::CURRENT_ANIMATION_DRIVER
+            if *control_flow != winit::event_loop::ControlFlow::Exit
+                && corelib::animations::CURRENT_ANIMATION_DRIVER
                     .with(|driver| driver.has_active_animations())
-                {
-                    *control_flow = ControlFlow::Poll;
-                    redraw_all_windows()
-                }
+            {
+                *control_flow = ControlFlow::Poll;
+                redraw_all_windows()
             }
 
             corelib::timers::TimerList::maybe_activate_timers();

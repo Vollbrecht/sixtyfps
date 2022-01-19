@@ -49,14 +49,17 @@ pub enum Type {
     Image,
     Bool,
     Model,
-    PathElements,
+    PathData, // Either a vector of path elements or a two vectors of events and coordinates
     Easing,
     Brush,
     /// This is usually a model
     Array(Box<Type>),
     Struct {
         fields: BTreeMap<String, Type>,
+        /// When declared in .60 as  `struct Foo := { }`, then the name is "Foo"
+        /// When there is no node, but there is a name, then it is a builtin type
         name: Option<String>,
+        /// When declared in .60, this is the node of the declaration.
         node: Option<syntax_nodes::ObjectType>,
     },
     Enumeration(Rc<Enumeration>),
@@ -100,7 +103,7 @@ impl core::cmp::PartialEq for Type {
             Type::Image => matches!(other, Type::Image),
             Type::Bool => matches!(other, Type::Bool),
             Type::Model => matches!(other, Type::Model),
-            Type::PathElements => matches!(other, Type::PathElements),
+            Type::PathData => matches!(other, Type::PathData),
             Type::Easing => matches!(other, Type::Easing),
             Type::Brush => matches!(other, Type::Brush),
             Type::Array(a) => matches!(other, Type::Array(b) if a == b),
@@ -174,7 +177,7 @@ impl Display for Type {
                 write!(f, "}}")
             }
 
-            Type::PathElements => write!(f, "pathelements"),
+            Type::PathData => write!(f, "pathdata"),
             Type::Easing => write!(f, "easing"),
             Type::Brush => write!(f, "brush"),
             Type::Enumeration(enumeration) => write!(f, "enum {}", enumeration.name),
@@ -258,7 +261,8 @@ impl Type {
                 } else {
                     Cow::Borrowed(name)
                 };
-                let property_type = n.lookup_property(resolved_name.as_ref()).unwrap_or_default();
+                let property_type =
+                    n.lookup_property(resolved_name.as_ref()).cloned().unwrap_or_default();
                 PropertyLookupResult { resolved_name, property_type }
             }
             _ => PropertyLookupResult {
@@ -403,7 +407,6 @@ impl Type {
             }
             true
         };
-
         match (self, other) {
             (a, b) if a == b => true,
             (_, Type::Invalid)
@@ -480,7 +483,7 @@ impl Type {
             Type::Image => None,
             Type::Bool => None,
             Type::Model => None,
-            Type::PathElements => None,
+            Type::PathData => None,
             Type::Easing => None,
             Type::Brush => None,
             Type::Array(_) => None,
@@ -563,9 +566,9 @@ impl NativeClass {
         self.properties.len() + self.parent.clone().map(|p| p.property_count()).unwrap_or_default()
     }
 
-    pub fn lookup_property(&self, name: &str) -> Option<Type> {
+    pub fn lookup_property(&self, name: &str) -> Option<&Type> {
         if let Some(bty) = self.properties.get(name) {
-            Some(bty.ty.clone())
+            Some(&bty.ty)
         } else if let Some(parent_class) = &self.parent {
             parent_class.lookup_property(name)
         } else {

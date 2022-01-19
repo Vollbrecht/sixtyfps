@@ -174,10 +174,10 @@ Example := Button {
 }
 ```
 
-The re-evaluation happens when the property is queried. Internally, dependency will be registered
-for any property accessed while evaluating this binding. When the dependent property are changed,
-all the dependent binding are marked dirty. Callbacks in native code by default does not depends on
-any property unless they query a property in the native code.
+The re-evaluation happens when the property is queried. Internally, a dependency will be registered
+for any property accessed while evaluating this binding. When the dependent properties are changed,
+all the dependent bindings are marked dirty. Callbacks in native code by default do not depend on
+any properties unless they query a property in the native code.
 
 ### Two-way Bindings
 
@@ -262,6 +262,7 @@ Example := Window {
 ```
 
 * **`length`**: One can query the length of an array and model using the builtin `.length` property.
+* **`array[index]`**: Individual elements of an array can be retrieved using the `array[index]` syntax.
 
 ### Conversions
 
@@ -675,6 +676,7 @@ This will animate the color property for 100ms when it changes.
 
 Animation can be configured with the following parameter:
 
+* `delay`: the amount of time to wait before starting the animation
 * `duration`: the amount of time it takes for the animation to complete
 * `loop-count`: FIXME
 * `easing`: can be `linear`, `ease`, `ease-in`, `ease-out`, `ease-in-out`, `cubic-bezier(a, b, c, d)` as in CSS
@@ -976,6 +978,14 @@ The trigonometry function. Note that the should be typed with `deg` or `rad` uni
 * **`sqrt(float) -> float`**
 
 Square root
+
+* **`pow(float, float) -> float`**
+
+Return the value of the first value raised to the second
+
+* **`log(float, float) -> float`**
+
+Return the log of the first value with a base of the second value
 
 ### `Colors` namespace
 

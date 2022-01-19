@@ -14,7 +14,7 @@ use std::rc::{Rc, Weak};
 // FIXME remove the pub
 pub use crate::namedreference::NamedReference;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 /// A function built into the run-time
 pub enum BuiltinFunction {
     GetWindowScaleFactor,
@@ -31,6 +31,8 @@ pub enum BuiltinFunction {
     ACos,
     ASin,
     ATan,
+    Log,
+    Pow,
     SetFocusItem,
     ShowPopupWindow,
     /// the "42".to_float()
@@ -83,6 +85,10 @@ impl BuiltinFunction {
             BuiltinFunction::ACos | BuiltinFunction::ASin | BuiltinFunction::ATan => {
                 Type::Function { return_type: Box::new(Type::Angle), args: vec![Type::Float32] }
             }
+            BuiltinFunction::Log | BuiltinFunction::Pow => Type::Function {
+                return_type: Box::new(Type::Float32),
+                args: vec![Type::Float32, Type::Float32],
+            },
             BuiltinFunction::SetFocusItem => Type::Function {
                 return_type: Box::new(Type::Void),
                 args: vec![Type::ElementReference],
@@ -154,6 +160,8 @@ impl BuiltinFunction {
             | BuiltinFunction::Tan
             | BuiltinFunction::ACos
             | BuiltinFunction::ASin
+            | BuiltinFunction::Log
+            | BuiltinFunction::Pow
             | BuiltinFunction::ATan => true,
             BuiltinFunction::SetFocusItem => false,
             BuiltinFunction::ShowPopupWindow => false,
@@ -366,6 +374,13 @@ pub enum Expression {
         name: String,
     },
 
+    /// Access to a index within an array.
+    ArrayIndex {
+        /// This expression should have [`Type::Array`] type
+        array: Box<Expression>,
+        index: Box<Expression>,
+    },
+
     /// Cast an expression to the given type
     Cast {
         from: Box<Expression>,
@@ -423,9 +438,7 @@ pub enum Expression {
         values: HashMap<String, Expression>,
     },
 
-    PathElements {
-        elements: Path,
-    },
+    PathData(Path),
 
     EasingCurve(EasingCurve),
 
@@ -498,6 +511,10 @@ impl Expression {
                     fields.get(name.as_str()).unwrap_or(&Type::Invalid).clone()
                 }
                 Type::Component(c) => c.root_element.borrow().lookup_property(name).property_type,
+                _ => Type::Invalid,
+            },
+            Expression::ArrayIndex { array, .. } => match array.ty() {
+                Type::Array(ty) => (*ty).clone(),
                 _ => Type::Invalid,
             },
             Expression::Cast { to, .. } => to.clone(),
@@ -577,7 +594,7 @@ impl Expression {
             Expression::UnaryOp { sub, .. } => sub.ty(),
             Expression::Array { element_ty, .. } => Type::Array(Box::new(element_ty.clone())),
             Expression::Struct { ty, .. } => ty.clone(),
-            Expression::PathElements { .. } => Type::PathElements,
+            Expression::PathData { .. } => Type::PathData,
             Expression::StoreLocalVariable { .. } => Type::Void,
             Expression::ReadLocalVariable { ty, .. } => ty.clone(),
             Expression::EasingCurve(_) => Type::Easing,
@@ -610,6 +627,10 @@ impl Expression {
             Expression::BuiltinMacroReference { .. } => {}
             Expression::ElementReference(_) => {}
             Expression::StructFieldAccess { base, .. } => visitor(&**base),
+            Expression::ArrayIndex { array, index } => {
+                visitor(&**array);
+                visitor(&**index);
+            }
             Expression::RepeaterIndexReference { .. } => {}
             Expression::RepeaterModelReference { .. } => {}
             Expression::Cast { from, .. } => visitor(&**from),
@@ -645,13 +666,16 @@ impl Expression {
                     visitor(x);
                 }
             }
-            Expression::PathElements { elements } => {
-                if let Path::Elements(elements) = elements {
+            Expression::PathData(data) => match data {
+                Path::Elements(elements) => {
                     for element in elements {
                         element.bindings.values().for_each(|binding| visitor(&binding.borrow()))
                     }
                 }
-            }
+                Path::Events(events, coordinates) => {
+                    events.iter().chain(coordinates.iter()).for_each(visitor);
+                }
+            },
             Expression::StoreLocalVariable { value, .. } => visitor(&**value),
             Expression::ReadLocalVariable { .. } => {}
             Expression::EasingCurve(_) => {}
@@ -692,6 +716,10 @@ impl Expression {
             Expression::BuiltinMacroReference { .. } => {}
             Expression::ElementReference(_) => {}
             Expression::StructFieldAccess { base, .. } => visitor(&mut **base),
+            Expression::ArrayIndex { array, index } => {
+                visitor(&mut **array);
+                visitor(&mut **index);
+            }
             Expression::RepeaterIndexReference { .. } => {}
             Expression::RepeaterModelReference { .. } => {}
             Expression::Cast { from, .. } => visitor(&mut **from),
@@ -727,8 +755,8 @@ impl Expression {
                     visitor(x);
                 }
             }
-            Expression::PathElements { elements } => {
-                if let Path::Elements(elements) = elements {
+            Expression::PathData(data) => match data {
+                Path::Elements(elements) => {
                     for element in elements {
                         element
                             .bindings
@@ -736,7 +764,10 @@ impl Expression {
                             .for_each(|binding| visitor(&mut binding.borrow_mut()))
                     }
                 }
-            }
+                Path::Events(events, coordinates) => {
+                    events.iter_mut().chain(coordinates.iter_mut()).for_each(visitor);
+                }
+            },
             Expression::StoreLocalVariable { value, .. } => visitor(&mut **value),
             Expression::ReadLocalVariable { .. } => {}
             Expression::EasingCurve(_) => {}
@@ -788,6 +819,7 @@ impl Expression {
             Expression::FunctionParameterReference { .. } => false,
             Expression::BuiltinMacroReference { .. } => true,
             Expression::StructFieldAccess { base, .. } => base.is_constant(),
+            Expression::ArrayIndex { array, index } => array.is_constant() && index.is_constant(),
             Expression::Cast { from, .. } => from.is_constant(),
             Expression::CodeBlock(sub) => sub.len() == 1 && sub.first().unwrap().is_constant(),
             Expression::FunctionCall { function, arguments, .. } => {
@@ -803,8 +835,8 @@ impl Expression {
             Expression::UnaryOp { sub, .. } => sub.is_constant(),
             Expression::Array { values, .. } => values.iter().all(Expression::is_constant),
             Expression::Struct { values, .. } => values.iter().all(|(_, v)| v.is_constant()),
-            Expression::PathElements { elements } => {
-                if let Path::Elements(elements) = elements {
+            Expression::PathData(data) => {
+                if let Path::Elements(elements) = data {
                     elements
                         .iter()
                         .all(|element| element.bindings.values().all(|v| v.borrow().is_constant()))
@@ -831,6 +863,7 @@ impl Expression {
     }
 
     /// Create a conversion node if needed, or throw an error if the type is not matching
+    #[must_use]
     pub fn maybe_convert_to(
         self,
         target_type: Type,
@@ -1015,7 +1048,7 @@ impl Expression {
             },
             Type::Bool => Expression::BoolLiteral(false),
             Type::Model => Expression::Invalid,
-            Type::PathElements => Expression::PathElements { elements: Path::Elements(vec![]) },
+            Type::PathData => Expression::PathData(Path::Elements(vec![])),
             Type::Array(element_ty) => {
                 Expression::Array { element_ty: (**element_ty).clone(), values: vec![] }
             }
@@ -1048,6 +1081,7 @@ impl Expression {
             }
             Expression::StructFieldAccess { base, .. } => base.try_set_rw(),
             Expression::RepeaterModelReference { .. } => true,
+            Expression::ArrayIndex { .. } => true,
             _ => false,
         }
     }
@@ -1166,15 +1200,16 @@ pub struct BindingAnalysis {
 
     /// true if the binding is a constant value that can be set without creating a binding at runtime
     pub is_const: bool,
-}
 
-pub type PathEvent = lyon_path::Event<lyon_path::math::Point, lyon_path::math::Point>;
-pub type PathEvents = Vec<PathEvent>;
+    /// true if this binding does not depends on the value of property that are set externally.
+    /// When true, this binding cannot be part of a binding loop involving external components
+    pub no_external_dependencies: bool,
+}
 
 #[derive(Debug, Clone)]
 pub enum Path {
     Elements(Vec<PathElement>),
-    Events(PathEvents),
+    Events(Vec<Expression>, Vec<Expression>),
 }
 
 #[derive(Debug, Clone)]
@@ -1241,6 +1276,12 @@ pub fn pretty_print(f: &mut dyn std::fmt::Write, expression: &Expression) -> std
         Expression::StructFieldAccess { base, name } => {
             pretty_print(f, base)?;
             write!(f, ".{}", name)
+        }
+        Expression::ArrayIndex { array, index } => {
+            pretty_print(f, array)?;
+            write!(f, "[")?;
+            pretty_print(f, index)?;
+            write!(f, "]")
         }
         Expression::Cast { from, to } => {
             write!(f, "(")?;
@@ -1310,7 +1351,7 @@ pub fn pretty_print(f: &mut dyn std::fmt::Write, expression: &Expression) -> std
             }
             write!(f, " }}")
         }
-        Expression::PathElements { elements } => write!(f, "{:?}", elements),
+        Expression::PathData(data) => write!(f, "{:?}", data),
         Expression::EasingCurve(e) => write!(f, "{:?}", e),
         Expression::LinearGradient { angle, stops } => {
             write!(f, "@linear-gradient(")?;

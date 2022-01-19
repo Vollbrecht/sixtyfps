@@ -104,7 +104,7 @@ pub(crate) fn solve_layout(
             core_layout::solve_grid_layout(&core_layout::GridLayoutData {
                 size: size_ref.map(expr_eval).unwrap_or(0.),
                 spacing,
-                padding: &padding,
+                padding,
                 cells: Slice::from(cells.as_slice()),
             })
             .into()
@@ -128,7 +128,7 @@ pub(crate) fn solve_layout(
                 &core_layout::BoxLayoutData {
                     size: size_ref.as_ref().map(expr_eval).unwrap_or(0.),
                     spacing,
-                    padding: &padding,
+                    padding,
                     alignment,
                     cells: Slice::from(cells.as_slice()),
                 },
@@ -144,8 +144,8 @@ pub(crate) fn solve_layout(
                     height: path_layout.rect.height_reference.as_ref().map(expr_eval).unwrap_or(0.),
                     x: 0.,
                     y: 0.,
-                    elements: &eval::eval_expression(
-                        &Expression::PathElements { elements: path_layout.path.clone() },
+                    elements: eval::eval_expression(
+                        &Expression::PathData(path_layout.path.clone()),
                         local_context,
                     )
                     .try_into()

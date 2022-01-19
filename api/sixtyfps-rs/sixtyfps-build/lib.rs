@@ -73,6 +73,7 @@ impl CompilerConfiguration {
 
     /// Create a new configuration that includes sets the include paths used for looking up
     /// `.60` imports to the specified vector of paths.
+    #[must_use]
     pub fn with_include_paths(self, include_paths: Vec<std::path::PathBuf>) -> Self {
         let mut config = self.config;
         config.include_paths = include_paths;
@@ -80,6 +81,7 @@ impl CompilerConfiguration {
     }
 
     /// Create a new configuration that selects the style to be used for widgets.
+    #[must_use]
     pub fn with_style(self, style: String) -> Self {
         let mut config = self.config;
         config.style = Some(style);
@@ -213,7 +215,7 @@ pub fn compile_with_config(
     let syntax_node = syntax_node.expect("diags contained no compilation errors");
 
     // 'spin_on' is ok here because the compiler in single threaded and does not block if there is no blocking future
-    let (doc, mut diag) = spin_on::spin_on(sixtyfps_compilerlib::compile_syntax_node(
+    let (doc, diag) = spin_on::spin_on(sixtyfps_compilerlib::compile_syntax_node(
         syntax_node,
         diag,
         compiler_config,
@@ -235,28 +237,20 @@ pub fn compile_with_config(
 
     let file = std::fs::File::create(&output_file_path).map_err(CompileError::SaveError)?;
     let mut code_formatter = CodeFormatter { indentation: 0, in_string: false, sink: file };
-    let generated = match sixtyfps_compilerlib::generator::rust::generate(&doc, &mut diag) {
-        Some(code) => {
-            for x in &diag.all_loaded_files {
-                if x.is_absolute() {
-                    println!("cargo:rerun-if-changed={}", x.display());
-                }
-            }
+    let generated = sixtyfps_compilerlib::generator::rust::generate(&doc);
 
-            // print warnings
-            diag.diagnostics_as_string().lines().for_each(|w| {
-                if !w.is_empty() {
-                    println!("cargo:warning={}", w.strip_prefix("warning: ").unwrap_or(w))
-                }
-            });
-            code
+    for x in &diag.all_loaded_files {
+        if x.is_absolute() {
+            println!("cargo:rerun-if-changed={}", x.display());
         }
-        None => {
-            let vec = diag.to_string_vec();
-            diag.print();
-            return Err(CompileError::CompileError(vec));
+    }
+
+    // print warnings
+    diag.diagnostics_as_string().lines().for_each(|w| {
+        if !w.is_empty() {
+            println!("cargo:warning={}", w.strip_prefix("warning: ").unwrap_or(w))
         }
-    };
+    });
 
     write!(code_formatter, "{}", generated).map_err(CompileError::SaveError)?;
     println!("{}\ncargo:rerun-if-changed={}", rerun_if_changed, path.display());

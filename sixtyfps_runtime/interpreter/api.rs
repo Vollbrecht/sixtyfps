@@ -18,8 +18,6 @@ pub use sixtyfps_corelib::window::api::Window;
 
 /// This enum represents the different public variants of the [`Value`] enum, without
 /// the contained values.
-// NOTE: The docs for ValueType are duplicated in sixtyfps_interpreter.h, for extraction by
-// Doxygen. Keep in sync!
 #[derive(Debug, Copy, Clone, PartialEq)]
 #[repr(i8)]
 pub enum ValueType {
@@ -104,7 +102,7 @@ pub enum Value {
     Brush(Brush),
     #[doc(hidden)]
     /// The elements of a path
-    PathElements(PathData),
+    PathData(PathData),
     #[doc(hidden)]
     /// An easing curve
     EasingCurve(sixtyfps_corelib::animations::EasingCurve),
@@ -152,7 +150,7 @@ impl PartialEq for Value {
             Value::Model(lhs) => matches!(other, Value::Model(rhs) if Rc::ptr_eq(lhs, rhs)),
             Value::Struct(lhs) => matches!(other, Value::Struct(rhs) if lhs == rhs),
             Value::Brush(lhs) => matches!(other, Value::Brush(rhs) if lhs == rhs),
-            Value::PathElements(lhs) => matches!(other, Value::PathElements(rhs) if lhs == rhs),
+            Value::PathData(lhs) => matches!(other, Value::PathData(rhs) if lhs == rhs),
             Value::EasingCurve(lhs) => matches!(other, Value::EasingCurve(rhs) if lhs == rhs),
             Value::EnumerationValue(lhs_name, lhs_value) => {
                 matches!(other, Value::EnumerationValue(rhs_name, rhs_value) if lhs_name == rhs_name && lhs_value == rhs_value)
@@ -174,7 +172,7 @@ impl std::fmt::Debug for Value {
             Value::Model(_) => write!(f, "Value::Model(<model object>)"),
             Value::Struct(s) => write!(f, "Value::Struct({:?})", s),
             Value::Brush(b) => write!(f, "Value::Brush({:?})", b),
-            Value::PathElements(e) => write!(f, "Value::PathElements({:?})", e),
+            Value::PathData(e) => write!(f, "Value::PathElements({:?})", e),
             Value::EasingCurve(c) => write!(f, "Value::EasingCurve({:?})", c),
             Value::EnumerationValue(n, v) => write!(f, "Value::EnumerationValue({:?}, {:?})", n, v),
             Value::LayoutCache(v) => write!(f, "Value::LayoutCache({:?})", v),
@@ -217,7 +215,7 @@ declare_value_conversion!(Bool => [bool] );
 declare_value_conversion!(Image => [Image] );
 declare_value_conversion!(Struct => [Struct] );
 declare_value_conversion!(Brush => [Brush] );
-declare_value_conversion!(PathElements => [PathData]);
+declare_value_conversion!(PathData => [PathData]);
 declare_value_conversion!(EasingCurve => [sixtyfps_corelib::animations::EasingCurve]);
 declare_value_conversion!(LayoutCache => [SharedVector<f32>] );
 
@@ -310,6 +308,7 @@ declare_value_enum_conversion!(sixtyfps_corelib::items::StandardButtonKind, Stan
 declare_value_enum_conversion!(sixtyfps_corelib::items::PointerEventKind, PointerEventKind);
 declare_value_enum_conversion!(sixtyfps_corelib::items::PointerEventButton, PointerEventButton);
 declare_value_enum_conversion!(sixtyfps_corelib::items::DialogButtonRole, DialogButtonRole);
+declare_value_enum_conversion!(sixtyfps_corelib::graphics::PathEvent, PathEvent);
 
 impl From<sixtyfps_corelib::animations::Instant> for Value {
     fn from(value: sixtyfps_corelib::animations::Instant) -> Self {
@@ -994,6 +993,7 @@ impl ComponentInstance {
     /// Clone is not implemented because of the danger of circular reference:
     /// If you want to use this instance in a callback, you should capture a weak
     /// reference given by [`Self::as_weak`].
+    #[must_use]
     pub fn clone_strong(&self) -> Self {
         Self { inner: self.inner.clone() }
     }

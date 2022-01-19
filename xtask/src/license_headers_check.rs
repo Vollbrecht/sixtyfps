@@ -6,7 +6,6 @@ use anyhow::Result;
 use lazy_static::lazy_static;
 use std::str::FromStr;
 use std::{path::Path, path::PathBuf};
-use structopt::StructOpt;
 
 #[derive(Copy, Clone, Debug)]
 struct LicenseTagStyle {
@@ -126,9 +125,9 @@ fn test_license_tag_c_style() {
         let source = format!(
             r#"// Copyright © something <bar@something.com>
 foobar
-// SPDX-License-Identifier: {}
+// SP{}-License-Identifier: {}
 blah"#,
-            EXPECTED_SPDX_EXPRESSION
+            "DX", EXPECTED_SPDX_EXPRESSION
         );
         let test_source = SourceFileWithTags::new(&source, &style);
         assert_eq!(
@@ -143,10 +142,10 @@ blah"#
         let source = format!(
             r#"// Copyright © something <bar@something.com>
 foobar
-// SPDX-License-Identifier: {}
+// SP{}-License-Identifier: {}
 
 blah"#,
-            EXPECTED_SPDX_EXPRESSION
+            "DX", EXPECTED_SPDX_EXPRESSION
         );
         let test_source = SourceFileWithTags::new(&source, &style);
         assert_eq!(
@@ -195,10 +194,10 @@ fn test_license_tag_hash() {
         let source = format!(
             r#"# Copyright © something <bar@something.com>
 foobar
-# SPDX-License-Identifier: {}
+# SP{}-License-Identifier: {}
 
 blah"#,
-            EXPECTED_SPDX_EXPRESSION
+            "DX", EXPECTED_SPDX_EXPRESSION
         );
         let test_source = SourceFileWithTags::new(&source, &style);
         assert_eq!(
@@ -228,10 +227,10 @@ fn test_license_tag_dotdot() {
         let source = format!(
             r#".. Copyright © something <bar@something.com>
 foobar
-.. SPDX-License-Identifier: {}
+.. SP{}-License-Identifier: {}
 
 blah"#,
-            EXPECTED_SPDX_EXPRESSION
+            "DX", EXPECTED_SPDX_EXPRESSION
         );
         let test_source = SourceFileWithTags::new(&source, &style);
         assert_eq!(
@@ -267,6 +266,7 @@ lazy_static! {
         ("^helper_crates/const-field-offset/src/lib.rs$", LicenseLocation::NoLicense), // Upstream fork
         ("^helper_crates/const-field-offset/Cargo.toml$", LicenseLocation::NoLicense), // Upstream fork
         (".+webpack\\..+\\.js$", LicenseLocation::NoLicense),
+        (".+\\.license$", LicenseLocation::NoLicense),
         (".+\\.rs$", LicenseLocation::Tag(LicenseTagStyle::c_style_comment_style())),
         (".+\\.js$", LicenseLocation::Tag(LicenseTagStyle::c_style_comment_style())),
         (".+\\.ts$", LicenseLocation::Tag(LicenseTagStyle::c_style_comment_style())),
@@ -338,7 +338,7 @@ impl<'a> LicenseHeader<'a> {
 
 const EXPECTED_SPDX_EXPRESSION: &str = "(GPL-3.0-only OR LicenseRef-SixtyFPS-commercial)";
 const EXPECTED_SPDX_ID: &str =
-    const_format::concatcp!("SPDX-License-Identifier: ", EXPECTED_SPDX_EXPRESSION);
+    const_format::concatcp!("SP", "DX-License-Identifier: ", EXPECTED_SPDX_EXPRESSION); // Do not confuse the reuse tool
 
 const EXPECTED_HEADER: LicenseHeader<'static> =
     LicenseHeader(&["Copyright © SixtyFPS GmbH <info@sixtyfps.io>", EXPECTED_SPDX_ID]);
@@ -490,15 +490,15 @@ impl CargoToml {
     }
 }
 
-#[derive(Debug, StructOpt)]
+#[derive(Debug, clap::Parser)]
 pub struct LicenseHeaderCheck {
-    #[structopt(long)]
+    #[clap(long)]
     fix_it: bool,
 
-    #[structopt(long)]
+    #[clap(long)]
     show_all: bool,
 
-    #[structopt(long)]
+    #[clap(long)]
     verbose: bool,
 }
 
@@ -634,7 +634,10 @@ impl LicenseHeaderCheck {
 
         match location {
             LicenseLocation::Tag(tag_style) => self.check_file_tags(path, tag_style),
-            LicenseLocation::Crate => self.check_cargo_toml(path),
+            LicenseLocation::Crate => {
+                self.check_file_tags(path, &LicenseTagStyle::shell_comment_style())?;
+                self.check_cargo_toml(path)
+            }
             LicenseLocation::NoLicense => {
                 if self.verbose {
                     println!("Skipping {} as configured", path_str);

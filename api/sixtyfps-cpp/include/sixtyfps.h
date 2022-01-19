@@ -36,19 +36,6 @@ struct ItemVTable;
 /// \endrst
 namespace sixtyfps {
 
-// these macro are defined in the generated sixtyfps_internal.h
-#if defined(DOXYGEN)
-/// This macro expands to the to the numeric value of the major version of SixtyFPS you're
-/// developing against. For example if you're using version 1.5.2, this macro will expand to 1.
-#    define SIXTYFPS_VERSION_MAJOR SIXTYFPS_VERSION_MAJOR
-/// This macro expands to the to the numeric value of the minor version of SixtyFPS you're
-/// developing against. For example if you're using version 1.5.2, this macro will expand to 5.
-#    define SIXTYFPS_VERSION_MINOR SIXTYFPS_VERSION_MINOR
-/// This macro expands to the to the numeric value of the patch version of SixtyFPS you're
-/// developing against. For example if you're using version 1.5.2, this macro will expand to 2.
-#    define SIXTYFPS_VERSION_PATCH SIXTYFPS_VERSION_PATCH
-#endif
-
 // Bring opaque structure in scope
 namespace private_api {
 using cbindgen_private::ComponentVTable;
@@ -342,18 +329,47 @@ private:
 /// Use the static single_shot function to make a single shot timer
 struct Timer
 {
+    /// Construct a null timer. Use the start() method to activate the timer with a mode, interval
+    /// and callback.
+    Timer() : id(-1) { }
     /// Construct a timer which will repeat the callback every `interval` milliseconds until
     /// the destructor of the timer is called.
+    ///
+    /// This is a convenience function and equivalent to calling
+    /// `start(sixtyfps::TimerMode::Repeated, interval, callback);` on a default constructed Timer.
     template<typename F>
     Timer(std::chrono::milliseconds interval, F callback)
         : id(cbindgen_private::sixtyfps_timer_start(
-                interval.count(), [](void *data) { (*reinterpret_cast<F *>(data))(); },
-                new F(std::move(callback)), [](void *data) { delete reinterpret_cast<F *>(data); }))
+                -1, TimerMode::Repeated, interval.count(),
+                [](void *data) { (*reinterpret_cast<F *>(data))(); }, new F(std::move(callback)),
+                [](void *data) { delete reinterpret_cast<F *>(data); }))
     {
     }
     Timer(const Timer &) = delete;
     Timer &operator=(const Timer &) = delete;
-    ~Timer() { cbindgen_private::sixtyfps_timer_stop(id); }
+    ~Timer() { cbindgen_private::sixtyfps_timer_destroy(id); }
+
+    /// Starts the timer with the given \a mode and \a interval, in order for the \a callback to
+    /// called when the timer fires. If the timer has been started previously and not fired yet,
+    /// then it will be restarted.
+    template<typename F>
+    void start(TimerMode mode, std::chrono::milliseconds interval, F callback)
+    {
+        id = cbindgen_private::sixtyfps_timer_start(
+                id, mode, interval.count(), [](void *data) { (*reinterpret_cast<F *>(data))(); },
+                new F(std::move(callback)), [](void *data) { delete reinterpret_cast<F *>(data); });
+    }
+    /// Stops the previously started timer. Does nothing if the timer has never been started. A
+    /// stopped timer cannot be restarted with restart() -- instead you need to call start().
+    void stop() { cbindgen_private::sixtyfps_timer_stop(id); }
+    /// Restarts the timer. If the timer was previously started by calling [`Self::start()`]
+    /// with a duration and callback, then the time when the callback will be next invoked
+    /// is re-calculated to be in the specified duration relative to when this function is called.
+    ///
+    /// Does nothing if the timer was never started.
+    void restart() { cbindgen_private::sixtyfps_timer_restart(id); }
+    /// Returns true if the timer is running; false otherwise.
+    bool running() const { return cbindgen_private::sixtyfps_timer_running(id); }
 
     /// Call the callback after the given duration.
     template<typename F>
@@ -368,25 +384,7 @@ private:
     int64_t id;
 };
 
-// layouts:
-using cbindgen_private::BoxLayoutCellData;
-using cbindgen_private::BoxLayoutData;
-using cbindgen_private::GridLayoutCellData;
-using cbindgen_private::GridLayoutData;
-using cbindgen_private::LayoutAlignment;
-using cbindgen_private::LayoutInfo;
-using cbindgen_private::Orientation;
-using cbindgen_private::Padding;
-using cbindgen_private::PathLayoutData;
-using cbindgen_private::Rect;
-using cbindgen_private::sixtyfps_box_layout_info;
-using cbindgen_private::sixtyfps_box_layout_info_ortho;
-using cbindgen_private::sixtyfps_grid_layout_info;
-using cbindgen_private::sixtyfps_solve_box_layout;
-using cbindgen_private::sixtyfps_solve_grid_layout;
-using cbindgen_private::sixtyfps_solve_path_layout;
-
-#if !defined(DOXYGEN)
+namespace cbindgen_private {
 inline LayoutInfo LayoutInfo::merge(const LayoutInfo &other) const
 {
     // Note: This "logic" is duplicated from LayoutInfo::merge in layout.rs.
@@ -397,10 +395,8 @@ inline LayoutInfo LayoutInfo::merge(const LayoutInfo &other) const
                         std::max(preferred, other.preferred),
                         std::min(stretch, other.stretch) };
 }
-#endif
 
 /// FIXME! this should be done by cbindgen
-namespace cbindgen_private {
 inline bool operator==(const LayoutInfo &a, const LayoutInfo &b)
 {
     return a.min == b.min && a.max == b.max && a.min_percent == b.min_percent
@@ -414,6 +410,54 @@ inline bool operator!=(const LayoutInfo &a, const LayoutInfo &b)
 }
 
 namespace private_api {
+
+inline SharedVector<float> solve_box_layout(const cbindgen_private::BoxLayoutData &data,
+                                            Slice<int> repeater_indexes)
+{
+    SharedVector<float> result;
+    Slice<uint32_t> ri { reinterpret_cast<uint32_t *>(repeater_indexes.ptr), repeater_indexes.len };
+    cbindgen_private::sixtyfps_solve_box_layout(&data, ri, &result);
+    return result;
+}
+
+inline SharedVector<float> solve_grid_layout(const cbindgen_private::GridLayoutData &data)
+{
+    SharedVector<float> result;
+    cbindgen_private::sixtyfps_solve_grid_layout(&data, &result);
+    return result;
+}
+
+inline cbindgen_private::LayoutInfo
+grid_layout_info(Slice<cbindgen_private::GridLayoutCellData> cells, float spacing,
+                 const cbindgen_private::Padding &padding)
+{
+    return cbindgen_private::sixtyfps_grid_layout_info(cells, spacing, &padding);
+}
+
+inline cbindgen_private::LayoutInfo
+box_layout_info(Slice<cbindgen_private::BoxLayoutCellData> cells, float spacing,
+                const cbindgen_private::Padding &padding,
+                cbindgen_private::LayoutAlignment alignment)
+{
+    return cbindgen_private::sixtyfps_box_layout_info(cells, spacing, &padding, alignment);
+}
+
+inline cbindgen_private::LayoutInfo
+box_layout_info_ortho(Slice<cbindgen_private::BoxLayoutCellData> cells,
+                      const cbindgen_private::Padding &padding)
+{
+    return cbindgen_private::sixtyfps_box_layout_info_ortho(cells, &padding);
+}
+
+inline SharedVector<float> solve_path_layout(const cbindgen_private::PathLayoutData &data,
+                                             Slice<int> repeater_indexes)
+{
+    SharedVector<float> result;
+    Slice<uint32_t> ri { reinterpret_cast<uint32_t *>(repeater_indexes.ptr), repeater_indexes.len };
+    cbindgen_private::sixtyfps_solve_path_layout(&data, ri, &result);
+    return result;
+}
+
 /// Access the layout cache of an item within a repeater
 inline float layout_cache_access(const SharedVector<float> &cache, int offset, int repeater_index)
 {
@@ -471,24 +515,43 @@ public:
     /// \private
     /// Internal function called from within bindings to register with the currently
     /// evaluating dependency and get notified when this model's row count changes.
-    void track_row_count_changes() { model_dirty_property.get(); }
+    void track_row_count_changes() { model_row_count_dirty_property.get(); }
+
+    /// \private
+    /// Internal function called from within bindings to register with the currently
+    /// evaluating dependency and get notified when this model's row data changes.
+    void track_row_data_changes(int row)
+    {
+        auto it = std::lower_bound(tracked_rows.begin(), tracked_rows.end(), row);
+        if (it == tracked_rows.end() || row < *it) {
+            tracked_rows.insert(it, row);
+        }
+        model_row_data_dirty_property.get();
+    }
 
 protected:
     /// Notify the views that a specific row was changed
     void row_changed(int row)
     {
+        if (std::binary_search(tracked_rows.begin(), tracked_rows.end(), row)) {
+            model_row_data_dirty_property.mark_dirty();
+        }
         for_each_peers([=](auto peer) { peer->row_changed(row); });
     }
     /// Notify the views that rows were added
     void row_added(int index, int count)
     {
-        model_dirty_property.mark_dirty();
+        model_row_count_dirty_property.mark_dirty();
+        tracked_rows.clear();
+        model_row_data_dirty_property.mark_dirty();
         for_each_peers([=](auto peer) { peer->row_added(index, count); });
     }
     /// Notify the views that rows were removed
     void row_removed(int index, int count)
     {
-        model_dirty_property.mark_dirty();
+        model_row_count_dirty_property.mark_dirty();
+        tracked_rows.clear();
+        model_row_data_dirty_property.mark_dirty();
         for_each_peers([=](auto peer) { peer->row_removed(index, count); });
     }
 
@@ -508,7 +571,9 @@ private:
                     peers.end());
     }
     std::vector<private_api::ModelPeer> peers;
-    private_api::Property<bool> model_dirty_property;
+    private_api::Property<bool> model_row_count_dirty_property;
+    private_api::Property<bool> model_row_data_dirty_property;
+    std::vector<int> tracked_rows;
 };
 
 namespace private_api {
@@ -578,6 +643,13 @@ public:
     {
         data.erase(data.begin() + index);
         this->row_removed(index, 1);
+    }
+
+    /// Inserts the given value as a new row at the specified index
+    void insert(size_t index, const ModelData &value)
+    {
+        data.insert(data.begin() + index, value);
+        this->row_added(int(index), 1);
     }
 };
 
@@ -679,16 +751,17 @@ public:
         viewport_height->set(h);
     }
 
-    intptr_t visit(TraversalOrder order, private_api::ItemVisitorRefMut visitor) const
+    uintptr_t visit(TraversalOrder order, private_api::ItemVisitorRefMut visitor) const
     {
         for (std::size_t i = 0; i < inner->data.size(); ++i) {
             int index = order == TraversalOrder::BackToFront ? i : inner->data.size() - 1 - i;
             auto ref = item_at(index);
-            if (ref.vtable->visit_children_item(ref, -1, order, visitor) != -1) {
+            if (ref.vtable->visit_children_item(ref, -1, order, visitor)
+                != std::numeric_limits<uint64_t>::max()) {
                 return index;
             }
         }
-        return -1;
+        return std::numeric_limits<uint64_t>::max();
     }
 
     vtable::VRef<private_api::ComponentVTable> item_at(int i) const

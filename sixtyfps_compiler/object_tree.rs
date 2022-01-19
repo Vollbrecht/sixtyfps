@@ -447,6 +447,8 @@ pub struct Element {
     /// This is the component-local index of this item in the item tree array.
     /// It is generated after the last pass and before the generators run.
     pub item_index: once_cell::unsync::OnceCell<usize>,
+    /// the index of the first children in the tree, set with item_index
+    pub item_index_of_first_children: once_cell::unsync::OnceCell<usize>,
 
     /// The AST node, if available
     pub node: Option<syntax_nodes::Element>,
@@ -1599,7 +1601,7 @@ pub fn visit_all_named_references_in_element(
     elem.borrow_mut().layout_info_prop = layout_info_prop;
 
     // visit two way bindings
-    for (_, expr) in &elem.borrow().bindings {
+    for expr in elem.borrow().bindings.values() {
         for nr in &mut expr.borrow_mut().two_way_bindings {
             vis(nr);
         }

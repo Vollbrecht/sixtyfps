@@ -1,3 +1,6 @@
+# Copyright © SixtyFPS GmbH <info@sixtyfps.io>
+# SPDX-License-Identifier: (GPL-3.0-only OR LicenseRef-SixtyFPS-commercial)
+
 [package]
 name = "sixtyfps-lsp"
 version = "0.1.6"
@@ -7,6 +10,8 @@ license = "(GPL-3.0-only OR LicenseRef-SixtyFPS-commercial)"
 description = "SixtyFPS LSP server"
 repository = "https://github.com/sixtyfpsui/sixtyfps"
 homepage = "https://sixtyfps.io"
+categories = ["gui", "development-tools"]
+keywords = ["lsp"]
 
 [package.metadata.bundle]
 name = "SixtyFPS Live Preview"
@@ -37,4 +42,4 @@ serde = "1.0.118"
 spin_on = "0.1"
 once_cell = "1"
 dunce = "1.0.1"
-structopt = "0.3.14"
+clap = { version = "3.0.5", features=["derive", "wrap_help"] }

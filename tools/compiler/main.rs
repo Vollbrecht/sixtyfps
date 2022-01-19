@@ -1,46 +1,41 @@
 // Copyright © SixtyFPS GmbH <info@sixtyfps.io>
 // SPDX-License-Identifier: (GPL-3.0-only OR LicenseRef-SixtyFPS-commercial)
 
+use clap::Parser;
 use sixtyfps_compilerlib::diagnostics::BuildDiagnostics;
 use sixtyfps_compilerlib::*;
 use std::io::Write;
-use structopt::StructOpt;
 
-#[derive(StructOpt)]
+#[derive(Parser)]
 struct Cli {
     /// Set output format
-    #[structopt(short = "f", long = "format", default_value = "cpp")]
+    #[clap(short = 'f', long = "format", default_value = "cpp")]
     format: generator::OutputFormat,
 
     /// Include path for other .60 files
-    #[structopt(short = "I", name = "include path", number_of_values = 1)]
+    #[clap(short = 'I', name = "include path", number_of_values = 1, parse(from_os_str))]
     include_paths: Vec<std::path::PathBuf>,
 
     /// Path to .60 file ('-' for stdin)
-    #[structopt(name = "file", parse(from_os_str))]
+    #[clap(name = "file", parse(from_os_str))]
     path: std::path::PathBuf,
 
     /// The style name ('native', 'fluent', or 'ugly')
-    #[structopt(long, name = "style name")]
+    #[clap(long, name = "style name")]
     style: Option<String>,
 
     /// Generate a dependency file
-    #[structopt(
-        name = "dependency file",
-        long = "depfile",
-        number_of_values = 1,
-        parse(from_os_str)
-    )]
+    #[clap(name = "dependency file", long = "depfile", number_of_values = 1, parse(from_os_str))]
     depfile: Option<std::path::PathBuf>,
 
     /// Sets the output file ('-' for stdout)
-    #[structopt(name = "file to generate", short = "o", default_value = "-")]
+    #[clap(name = "file to generate", short = 'o', default_value = "-", parse(from_os_str))]
     output: std::path::PathBuf,
 }
 
 fn main() -> std::io::Result<()> {
     proc_macro2::fallback::force(); // avoid a abort if panic=abort is set
-    let args = Cli::from_args();
+    let args = Cli::parse();
     let mut diag = BuildDiagnostics::default();
     let syntax_node = parser::parse_file(&args.path, &mut diag);
     //println!("{:#?}", syntax_node);
@@ -56,17 +51,12 @@ fn main() -> std::io::Result<()> {
     let syntax_node = syntax_node.expect("diags contained no compilation errors");
     let (doc, diag) = spin_on::spin_on(compile_syntax_node(syntax_node, diag, compiler_config));
 
-    let mut diag = diag.check_and_exit_on_error();
+    let diag = diag.check_and_exit_on_error();
 
     if args.output == std::path::Path::new("-") {
-        generator::generate(args.format, &mut std::io::stdout(), &doc, &mut diag)?;
+        generator::generate(args.format, &mut std::io::stdout(), &doc)?;
     } else {
-        generator::generate(
-            args.format,
-            &mut std::fs::File::create(&args.output)?,
-            &doc,
-            &mut diag,
-        )?;
+        generator::generate(args.format, &mut std::fs::File::create(&args.output)?, &doc)?;
     }
 
     if let Some(depfile) = args.depfile {

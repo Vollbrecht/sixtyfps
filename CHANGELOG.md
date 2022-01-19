@@ -9,6 +9,8 @@ All notable changes to this project will be documented in this file.
    has changed. This was undocumented, but if one was handling this in the
    `FocusScope` event, these keys will now be ignored. Use the `Keys.LeftArrow`
    and other code exposed in the `Keys` namespace instead
+ - For `sixtyfps::Timer` (C++ and Rust), it's now possible to call `restart()` after
+   a timer has been stopped previously by calling `stop()`.
 
 ### Added
 
@@ -19,6 +21,13 @@ All notable changes to this project will be documented in this file.
  - Optimize some property access by doing more constant propagation
  - More special keyboard key codes are provided in the `FocusScope`, and
    special keys are handled
+ - `start()`, `stop()`, `running()` and a default constructor for C++ `sixtyfps::Timer`
+ - Math functions `log`, and `pow`
+ - Property animations now have a `delay` property, which will delay the start
+   of the animation.
+ - Rust: Added `sixtyfps::VecModel::insert(&self, index, value)`.
+ - C++: Added `sixtyfps::VecModel::insert(index, value)`.
+ - Added ability to access elements of a model with the `[index]` syntax.
 
 ### Fixed
 

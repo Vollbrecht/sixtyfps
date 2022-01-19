@@ -132,7 +132,9 @@ set(generated_headers
     ${CMAKE_CURRENT_BINARY_DIR}/generated_include/sixtyfps_pathdata_internal.h
     ${CMAKE_CURRENT_BINARY_DIR}/generated_include/sixtyfps_qt_internal.h
     ${CMAKE_CURRENT_BINARY_DIR}/generated_include/sixtyfps_backend_internal.h
+    ${CMAKE_CURRENT_BINARY_DIR}/generated_include/sixtyfps_generated_public.h
     ${CMAKE_CURRENT_BINARY_DIR}/generated_include/sixtyfps_interpreter_internal.h
+    ${CMAKE_CURRENT_BINARY_DIR}/generated_include/sixtyfps_interpreter_generated_public.h
 )
 
 foreach(header IN LISTS generated_headers)
@@ -226,7 +228,7 @@ if(SIXTYFPS_PACKAGE_BUNDLE_QT)
             FILES ${Qt6_DIR}/../../../plugins/imageformats/qsvg.dll
             DESTINATION plugins/imageformats)
 
-        install(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/../../licenses/ DESTINATION licenses)
+        install(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/../../licenses/ DESTINATION LICENSES)
 
         set(CMAKE_INSTALL_SYSTEM_RUNTIME_LIBS_SKIP TRUE)
         include(InstallRequiredSystemLibraries)

@@ -8,6 +8,56 @@
 
 use std::fmt::Write;
 
+fn ident(ident: &str) -> String {
+    if ident.contains('-') {
+        ident.replace('-', "_")
+    } else {
+        ident.into()
+    }
+}
+
+/// Given a property reference to a native item (eg, the property name is empty)
+/// return tokens to the `ItemRc`
+fn access_item_rc(pr: &llr::PropertyReference, ctx: &EvaluationContext) -> String {
+    let mut ctx = ctx;
+    let mut component_access = "self".into();
+
+    let pr = match pr {
+        llr::PropertyReference::InParent { level, parent_reference } => {
+            for _ in 0..level.get() {
+                component_access = format!("{}->parent", component_access);
+                ctx = ctx.parent.as_ref().unwrap().ctx;
+            }
+            parent_reference
+        }
+        other @ _ => other,
+    };
+
+    match pr {
+        llr::PropertyReference::InNativeItem { sub_component_path, item_index, prop_name } => {
+            assert!(prop_name.is_empty());
+            let (sub_compo_path, sub_component) =
+                follow_sub_component_path(ctx.current_sub_component.unwrap(), &sub_component_path);
+            if !sub_component_path.is_empty() {
+                component_access = format!("{}->{}", &component_access, &sub_compo_path);
+            }
+            let component_rc = format!("{}->self_weak.lock()->into_dyn()", &component_access);
+            let item_index_in_tree = sub_component.items[*item_index].index_in_tree;
+            let item_index = if item_index_in_tree == 0 {
+                format!("{}->tree_index", &component_access)
+            } else {
+                format!(
+                    "{}->tree_index_of_first_child + {} - 1",
+                    &component_access, item_index_in_tree
+                )
+            };
+
+            format!("{}, {}", &component_rc, item_index)
+        }
+        _ => unreachable!(),
+    }
+}
+
 /// This module contains some data structure that helps represent a C++ code.
 /// It is then rendered into an actual C++ text using the Display trait
 mod cpp_ast {
@@ -236,28 +286,21 @@ mod cpp_ast {
     }
 }
 
-use crate::diagnostics::{BuildDiagnostics, Spanned};
-use crate::expression_tree::{
-    BindingExpression, BuiltinFunction, EasingCurve, Expression, NamedReference,
+use crate::expression_tree::{BuiltinFunction, EasingCurve};
+use crate::langtype::{NativeClass, Type};
+use crate::layout::Orientation;
+use crate::llr::{
+    self, EvaluationContext as llr_EvaluationContext, ParentCtx as llr_ParentCtx,
+    TypeResolutionContext as _,
 };
-use crate::langtype::Type;
-use crate::layout::{Layout, LayoutGeometry, LayoutRect, Orientation};
-use crate::object_tree::{
-    Component, Document, ElementRc, PropertyDeclaration, RepeatedElementInfo,
-};
+use crate::object_tree::Document;
 use cpp_ast::*;
-use itertools::Itertools;
-use std::borrow::Cow;
+use itertools::{Either, Itertools};
 use std::collections::BTreeMap;
-use std::rc::Rc;
+use std::num::NonZeroUsize;
 
-fn ident(ident: &str) -> Cow<'_, str> {
-    if ident.contains('-') {
-        ident.replace('-', "_").into()
-    } else {
-        ident.into()
-    }
-}
+type EvaluationContext<'a> = llr_EvaluationContext<'a, String>;
+type ParentCtx<'a> = llr_ParentCtx<'a, String>;
 
 impl CppType for Type {
     fn cpp_type(&self) -> Option<String> {
@@ -273,9 +316,13 @@ impl CppType for Type {
             Type::LogicalLength => Some("float".to_owned()),
             Type::Percent => Some("float".to_owned()),
             Type::Bool => Some("bool".to_owned()),
-            Type::Struct { name: Some(name), node: Some(_), .. } => Some(ident(name).into_owned()),
+            Type::Struct { name: Some(name), node: Some(_), .. } => Some(ident(name)),
             Type::Struct { name: Some(name), node: None, .. } => {
-                Some(format!("sixtyfps::cbindgen_private::{}", ident(name)))
+                Some(if name.starts_with("sixtyfps::") {
+                    name.clone()
+                } else {
+                    format!("sixtyfps::cbindgen_private::{}", ident(name))
+                })
             }
             Type::Struct { fields, .. } => {
                 let elem = fields.values().map(|v| v.cpp_type()).collect::<Option<Vec<_>>>()?;
@@ -296,17 +343,10 @@ impl CppType for Type {
     }
 }
 
-fn get_cpp_type(ty: &Type, decl: &PropertyDeclaration, diag: &mut BuildDiagnostics) -> String {
-    ty.cpp_type().unwrap_or_else(|| {
-        diag.push_error("Cannot map property type to C++".into(), &decl.type_node());
-        "".into()
-    })
-}
-
 fn to_cpp_orientation(o: Orientation) -> &'static str {
     match o {
-        Orientation::Horizontal => "sixtyfps::Orientation::Horizontal",
-        Orientation::Vertical => "sixtyfps::Orientation::Vertical",
+        Orientation::Horizontal => "sixtyfps::cbindgen_private::Orientation::Horizontal",
+        Orientation::Vertical => "sixtyfps::cbindgen_private::Orientation::Vertical",
     }
 }
 
@@ -343,73 +383,31 @@ fn remove_parentheses_test() {
     assert_eq!(remove_parentheses("()())("), "()())(");
 }
 
-fn new_struct_with_bindings(
-    type_name: &str,
-    bindings: &crate::object_tree::BindingsMap,
-    component: &Rc<Component>,
-) -> String {
-    let bindings_initialization: Vec<String> = bindings
-        .iter()
-        .map(|(prop, initializer)| {
-            let initializer = compile_expression(&initializer.borrow(), component);
-            format!("var.{} = {};", ident(prop), initializer)
-        })
-        .collect();
-
-    format!(
-        r#"[&](){{
-            {} var{{}};
-            {}
-            return var;
-        }}()"#,
-        type_name,
-        bindings_initialization.join("\n")
-    )
-}
-
-fn property_animation_code(component: &Rc<Component>, animation: &ElementRc) -> String {
-    new_struct_with_bindings(
-        "sixtyfps::cbindgen_private::PropertyAnimation",
-        &animation.borrow().bindings,
-        component,
-    )
-}
-
 fn property_set_value_code(
-    component: &Rc<Component>,
-    element: &ElementRc,
-    property_name: &str,
+    property: &llr::PropertyReference,
     value_expr: &str,
+    ctx: &EvaluationContext,
 ) -> String {
-    if let Some(binding) = element.borrow().bindings.get(property_name) {
-        if let Some(crate::object_tree::PropertyAnimation::Static(animation)) =
-            binding.borrow().animation.as_ref()
-        {
-            let animation_code = property_animation_code(component, animation);
-            return format!(
-                "set_animated_value({value}, {animation})",
-                value = value_expr,
-                animation = animation_code
-            );
-        }
+    let prop = access_member(property, ctx);
+    if let Some(animation) = ctx.current_sub_component.and_then(|c| c.animations.get(property)) {
+        let animation_code = compile_expression(animation, ctx);
+        return format!("{}.set_animated_value({}, {})", prop, value_expr, animation_code);
     }
-    format!("set({})", value_expr)
+    format!("{}.set({})", prop, value_expr)
 }
 
-fn handle_property_binding(
-    elem: &ElementRc,
-    prop_name: &str,
-    binding_expression: &BindingExpression,
+fn handle_property_init(
+    prop: &llr::PropertyReference,
+    binding_expression: &llr::BindingExpression,
     init: &mut Vec<String>,
+    ctx: &EvaluationContext,
 ) {
-    let item = elem.borrow();
-    let component = item.enclosing_component.upgrade().unwrap();
-    let prop_access = access_member(elem, prop_name, &component, "this");
-    let prop_type = item.lookup_property(prop_name).property_type;
+    let prop_access = access_member(prop, ctx);
+    let prop_type = ctx.property_ty(prop);
     if let Type::Callback { args, .. } = &prop_type {
-        if matches!(binding_expression.expression, Expression::Invalid) {
-            return;
-        }
+        let mut ctx2 = ctx.clone();
+        ctx2.argument_types = &args;
+
         let mut params = args.iter().enumerate().map(|(i, ty)| {
             format!("[[maybe_unused]] {} arg_{}", ty.cpp_type().unwrap_or_default(), i)
         });
@@ -422,27 +420,12 @@ fn handle_property_binding(
                     }});",
             prop_access = prop_access,
             params = params.join(", "),
-            code = compile_expression_wrap_return(binding_expression, &component)
+            code = compile_expression_wrap_return(&binding_expression.expression, &ctx2)
         ));
     } else {
-        for nr in &binding_expression.two_way_bindings {
-            init.push(format!(
-                "sixtyfps::private_api::Property<{ty}>::link_two_way(&{p1}, &{p2});",
-                ty = prop_type.cpp_type().unwrap_or_default(),
-                p1 = prop_access,
-                p2 = access_named_reference(nr, &component, "this")
-            ));
-        }
-        if matches!(binding_expression.expression, Expression::Invalid) {
-            return;
-        }
+        let init_expr = compile_expression_wrap_return(&binding_expression.expression, ctx);
 
-        let component = &item.enclosing_component.upgrade().unwrap();
-
-        let init_expr = compile_expression_wrap_return(binding_expression, component);
-
-        let is_constant = binding_expression.analysis.as_ref().map_or(false, |a| a.is_const);
-        init.push(if is_constant {
+        init.push(if binding_expression.is_constant {
             format!("{}.set({});", prop_access, init_expr)
         } else {
             let binding_code = format!(
@@ -458,39 +441,25 @@ fn handle_property_binding(
                 format!("sixtyfps::private_api::set_state_binding({}, {});", prop_access, binding_code)
             } else {
                 match &binding_expression.animation {
-                    Some(crate::object_tree::PropertyAnimation::Static(anim)) => {
-                        let anim = property_animation_code(component, anim);
+                    Some(llr::Animation::Static(anim)) => {
+                        let anim = compile_expression(anim, ctx);
                         format!("{}.set_animated_binding({}, {});", prop_access, binding_code, anim)
                     }
-                    Some(crate::object_tree::PropertyAnimation::Transition {
-                        state_ref,
-                        animations,
-                    }) => {
-                        let state_tokens = compile_expression(state_ref, component);
-                        let mut anim_expr = animations.iter().map(|a| {
-                            let cond = compile_expression(
-                                &a.condition(Expression::ReadLocalVariable {
-                                    name: "state".into(),
-                                    ty: state_ref.ty(),
-                                }),
-                                component,
-                            );
-                            let anim = property_animation_code(component, &a.animation);
-                            format!("if ({}) {{ return {}; }}", remove_parentheses(&cond), anim)
-                        });
+                    Some(llr::Animation::Transition (
+                        anim
+                    )) => {
+                        let anim = compile_expression(anim, ctx);
                         format!(
                             "{}.set_animated_binding_for_transition({},
                             [this](uint64_t *start_time) -> sixtyfps::cbindgen_private::PropertyAnimation {{
                                 [[maybe_unused]] auto self = this;
-                                auto state = {};
-                                *start_time = state.change_time;
-                                {}
-                                return {{}};
+                                auto [anim, time] = {};
+                                *start_time = time;
+                                return anim;
                             }});",
                             prop_access,
                             binding_code,
-                            state_tokens,
-                            anim_expr.join(" ")
+                            anim,
                         )
                     }
                     None => format!("{}.set_binding({});", prop_access, binding_code),
@@ -500,97 +469,8 @@ fn handle_property_binding(
     }
 }
 
-fn handle_item(elem: &ElementRc, field_access: Access, main_struct: &mut Struct) {
-    let item = elem.borrow();
-    main_struct.members.push((
-        field_access,
-        Declaration::Var(Var {
-            ty: format!(
-                "sixtyfps::cbindgen_private::{}",
-                ident(&item.base_type.as_native().class_name)
-            ),
-            name: ident(&item.id).into_owned(),
-            init: Some("{}".to_owned()),
-            ..Default::default()
-        }),
-    ));
-}
-
-fn handle_repeater(
-    repeated: &RepeatedElementInfo,
-    base_component: &Rc<Component>,
-    parent_component: &Rc<Component>,
-    repeater_count: u32,
-    component_struct: &mut Struct,
-    init: &mut Vec<String>,
-    children_visitor_cases: &mut Vec<String>,
-    diag: &mut BuildDiagnostics,
-) {
-    let parent_element = base_component.parent_element.upgrade().unwrap();
-    let repeater_id = format!("repeater_{}", ident(&parent_element.borrow().id));
-
-    let mut model = compile_expression(&repeated.model, parent_component);
-    if repeated.is_conditional_element {
-        // bool converts to int
-        // FIXME: don't do a heap allocation here
-        model = format!("std::make_shared<sixtyfps::private_api::IntModel>({})", model)
-    };
-
-    // FIXME: optimize  if repeated.model.is_constant()
-    init.push(format!(
-        "self->{repeater_id}.set_model_binding([self] {{ (void)self; return {model}; }});",
-        repeater_id = repeater_id,
-        model = model,
-    ));
-
-    if let Some(listview) = &repeated.is_listview {
-        let vp_y = access_named_reference(&listview.viewport_y, parent_component, "self");
-        let vp_h = access_named_reference(&listview.viewport_height, parent_component, "self");
-        let lv_h = access_named_reference(&listview.listview_height, parent_component, "self");
-        let vp_w = access_named_reference(&listview.viewport_width, parent_component, "self");
-        let lv_w = access_named_reference(&listview.listview_width, parent_component, "self");
-
-        let ensure_updated = format!(
-            "self->{}.ensure_updated_listview(self, &{}, &{}, &{}, {}.get(), {}.get());",
-            repeater_id, vp_w, vp_h, vp_y, lv_w, lv_h
-        );
-
-        children_visitor_cases.push(format!(
-            "\n        case {i}: {{
-                {e_u}
-                return self->{id}.visit(order, visitor);
-            }}",
-            i = repeater_count,
-            e_u = ensure_updated,
-            id = repeater_id,
-        ));
-    } else {
-        children_visitor_cases.push(format!(
-            "\n        case {i}: {{
-                self->{id}.ensure_updated(self);
-                return self->{id}.visit(order, visitor);
-            }}",
-            id = repeater_id,
-            i = repeater_count,
-        ));
-    }
-
-    component_struct.members.push((
-        Access::Private,
-        Declaration::Var(Var {
-            ty: format!(
-                "sixtyfps::private_api::Repeater<class {}, {}>",
-                component_id(base_component),
-                model_data_type(&parent_element, diag)
-            ),
-            name: repeater_id,
-            ..Default::default()
-        }),
-    ));
-}
-
 /// Returns the text of the C++ code produced by the given root component
-pub fn generate(doc: &Document, diag: &mut BuildDiagnostics) -> Option<impl std::fmt::Display> {
+pub fn generate(doc: &Document) -> impl std::fmt::Display {
     let mut file = File::default();
 
     file.includes.push("<array>".into());
@@ -632,62 +512,43 @@ pub fn generate(doc: &Document, diag: &mut BuildDiagnostics) -> Option<impl std:
         },
     ));
 
+    for ty in doc.root_component.used_types.borrow().structs.iter() {
+        if let Type::Struct { fields, name: Some(name), node: Some(_) } = ty {
+            generate_struct(&mut file, name, fields);
+        }
+    }
+
+    let llr = llr::lower_to_item_tree::lower_to_item_tree(&doc.root_component);
+
     // Forward-declare the root so that sub-components can access singletons, the window, etc.
     file.declarations.push(Declaration::Struct(Struct {
-        name: component_id(&doc.root_component),
+        name: ident(&llr.item_tree.root.name),
         ..Default::default()
     }));
 
-    for ty in doc.root_component.used_types.borrow().structs.iter() {
-        if let Type::Struct { fields, name: Some(name), node: Some(_) } = ty {
-            generate_struct(&mut file, name, fields, diag);
-        }
-    }
-
-    let mut components_to_add_as_friends = vec![];
-    for sub_comp in doc.root_component.used_types.borrow().sub_components.iter() {
-        generate_component(
+    for sub_compo in &llr.sub_components {
+        let sub_compo_id = ident(&sub_compo.name);
+        let mut sub_compo_struct = Struct { name: sub_compo_id.clone(), ..Default::default() };
+        generate_sub_component(
+            &mut sub_compo_struct,
+            sub_compo,
+            &llr,
+            None,
+            Access::Public,
             &mut file,
-            sub_comp,
-            &doc.root_component,
-            diag,
-            &mut components_to_add_as_friends,
         );
+        file.definitions.extend(sub_compo_struct.extract_definitions().collect::<Vec<_>>());
+        file.declarations.push(Declaration::Struct(sub_compo_struct));
     }
 
-    for glob in doc
-        .root_component
-        .used_types
-        .borrow()
-        .globals
-        .iter()
-        .filter(|glob| glob.requires_code_generation())
-    {
-        generate_component(
-            &mut file,
-            glob,
-            &doc.root_component,
-            diag,
-            &mut components_to_add_as_friends,
-        );
-
-        if glob.visible_in_public_api() {
-            file.definitions.extend(glob.global_aliases().into_iter().map(|name| {
-                Declaration::TypeAlias(TypeAlias {
-                    old_name: ident(&glob.root_element.borrow().id).into_owned(),
-                    new_name: name,
-                })
-            }))
-        }
+    for glob in llr.globals.iter().filter(|glob| !glob.is_builtin) {
+        generate_global(&mut file, glob, &llr);
+        file.definitions.extend(glob.aliases.iter().map(|name| {
+            Declaration::TypeAlias(TypeAlias { old_name: ident(&glob.name), new_name: ident(name) })
+        }))
     }
 
-    generate_component(
-        &mut file,
-        &doc.root_component,
-        &doc.root_component,
-        diag,
-        &mut components_to_add_as_friends,
-    );
+    generate_public_component(&mut file, &llr);
 
     file.definitions.push(Declaration::Var(Var{
         ty: format!(
@@ -700,19 +561,10 @@ pub fn generate(doc: &Document, diag: &mut BuildDiagnostics) -> Option<impl std:
         ..Default::default()
     }));
 
-    if diag.has_error() {
-        None
-    } else {
-        Some(file)
-    }
+    file
 }
 
-fn generate_struct(
-    file: &mut File,
-    name: &str,
-    fields: &BTreeMap<String, Type>,
-    diag: &mut BuildDiagnostics,
-) {
+fn generate_struct(file: &mut File, name: &str, fields: &BTreeMap<String, Type>) {
     let mut operator_eq = String::new();
     let mut members = fields
         .iter()
@@ -721,14 +573,8 @@ fn generate_struct(
             (
                 Access::Public,
                 Declaration::Var(Var {
-                    ty: t.cpp_type().unwrap_or_else(|| {
-                        diag.push_error(
-                            format!("Cannot map {} to a C++ type", t),
-                            &Option::<crate::parser::SyntaxNode>::None,
-                        );
-                        Default::default()
-                    }),
-                    name: ident(name).into_owned(),
+                    ty: t.cpp_type().unwrap(),
+                    name: ident(name),
                     ..Default::default()
                 }),
             )
@@ -768,818 +614,146 @@ fn generate_struct(
 /// Generate the component in `file`.
 ///
 /// `sub_components`, if Some, will be filled with all the sub component which needs to be added as friends
-fn generate_component(
-    file: &mut File,
-    component: &Rc<Component>,
-    root_component: &Rc<Component>,
-    diag: &mut BuildDiagnostics,
-    sub_components: &mut Vec<String>,
-) {
-    let component_id = component_id(component);
+fn generate_public_component(file: &mut File, component: &llr::PublicComponent) {
+    let root_component = &component.item_tree.root;
+    let component_id = ident(&root_component.name);
     let mut component_struct = Struct { name: component_id.clone(), ..Default::default() };
 
-    let is_child_component = component.parent_element.upgrade().is_some();
-    let is_sub_component = component.is_sub_component();
-
-    if component.is_root_component.get() {
-        component_struct.friends.extend(
-            component
-                .used_types
-                .borrow()
-                .sub_components
-                .iter()
-                .map(self::component_id)
-                .chain(std::mem::take(sub_components).into_iter()),
-        );
-    }
-
-    for c in component.popup_windows.borrow().iter() {
-        let mut friends = vec![self::component_id(&c.component)];
-        generate_component(file, &c.component, root_component, diag, &mut friends);
-        sub_components.extend_from_slice(friends.as_slice());
-        component_struct.friends.append(&mut friends);
-    }
-
-    let expose_property = |property: &PropertyDeclaration| -> bool {
-        if component.is_global() || component.is_root_component.get() {
-            property.expose_in_public_api
-        } else {
-            false
-        }
+    let ctx = EvaluationContext {
+        public_component: component,
+        current_sub_component: Some(&component.item_tree.root),
+        current_global: None,
+        generator_state: "this".to_string(),
+        parent: None,
+        argument_types: &[],
     };
 
-    let field_access = if !component.is_root_component.get() || component.is_global() {
-        Access::Public
-    } else {
-        Access::Private
-    };
+    let old_declarations = file.declarations.len();
 
-    let mut init_signature = "()";
-    let mut init = vec!["[[maybe_unused]] auto self = this;".into()];
-
-    for (prop_name, property_decl) in component.root_element.borrow().property_declarations.iter() {
-        let cpp_name = ident(prop_name);
-        let access = if let Some(alias) = &property_decl.is_alias {
-            access_named_reference(alias, component, "this")
-        } else {
-            format!("this->{}", cpp_name)
-        };
-
-        let ty = if let Type::Callback { args, return_type } = &property_decl.property_type {
-            let param_types =
-                args.iter().map(|t| get_cpp_type(t, property_decl, diag)).collect::<Vec<_>>();
-            let return_type = return_type
-                .as_ref()
-                .map_or("void".into(), |t| get_cpp_type(t, property_decl, diag));
-            if expose_property(property_decl) {
-                let callback_emitter = vec![format!(
-                    "return {}.call({});",
-                    access,
-                    (0..args.len()).map(|i| format!("arg_{}", i)).join(", ")
-                )];
-                component_struct.members.push((
-                    Access::Public,
-                    Declaration::Function(Function {
-                        name: format!("invoke_{}", cpp_name),
-                        signature: format!(
-                            "({}) const -> {}",
-                            param_types
-                                .iter()
-                                .enumerate()
-                                .map(|(i, ty)| format!("{} arg_{}", ty, i))
-                                .join(", "),
-                            return_type
-                        ),
-                        statements: Some(callback_emitter),
-                        ..Default::default()
-                    }),
-                ));
-                component_struct.members.push((
-                    Access::Public,
-                    Declaration::Function(Function {
-                        name: format!("on_{}", cpp_name),
-                        template_parameters: Some("typename Functor".into()),
-                        signature: "(Functor && callback_handler) const".into(),
-                        statements: Some(vec![format!(
-                            "{}.set_handler(std::forward<Functor>(callback_handler));",
-                            access
-                        )]),
-                        ..Default::default()
-                    }),
-                ));
-            }
-            format!("sixtyfps::private_api::Callback<{}({})>", return_type, param_types.join(", "))
-        } else {
-            let cpp_type = get_cpp_type(&property_decl.property_type, property_decl, diag);
-
-            if expose_property(property_decl) {
-                let prop_getter: Vec<String> = vec![format!("return {}.get();", access)];
-                component_struct.members.push((
-                    Access::Public,
-                    Declaration::Function(Function {
-                        name: format!("get_{}", cpp_name),
-                        signature: format!("() const -> {}", cpp_type),
-                        statements: Some(prop_getter),
-                        ..Default::default()
-                    }),
-                ));
-
-                let set_value = if let Some(alias) = &property_decl.is_alias {
-                    property_set_value_code(component, &alias.element(), alias.name(), "value")
-                } else {
-                    property_set_value_code(component, &component.root_element, prop_name, "value")
-                };
-
-                let prop_setter: Vec<String> = vec![
-                    "[[maybe_unused]] auto self = this;".into(),
-                    format!("{}.{};", access, set_value),
-                ];
-                component_struct.members.push((
-                    Access::Public,
-                    Declaration::Function(Function {
-                        name: format!("set_{}", cpp_name),
-                        signature: format!("(const {} &value) const", cpp_type),
-                        statements: Some(prop_setter),
-                        ..Default::default()
-                    }),
-                ));
-            }
-            format!("sixtyfps::private_api::Property<{}>", cpp_type)
-        };
-
-        if is_sub_component {
-            component_struct.members.push((
-                Access::Public,
-                Declaration::Function(Function {
-                    name: format!("get_{}", &cpp_name),
-                    signature: "() const".to_owned(),
-                    statements: Some(vec![format!("return &{};", access)]),
-                    ..Default::default()
-                }),
-            ));
-        }
-        if property_decl.is_alias.is_none() {
-            component_struct.members.push((
-                field_access,
-                Declaration::Var(Var { ty, name: cpp_name.into_owned(), ..Default::default() }),
-            ));
-        }
-    }
-
-    let mut constructor_arguments = String::new();
-    let mut constructor_member_initializers = vec![];
-    let mut constructor_code = vec![];
-
-    if component.is_root_component.get() || is_child_component {
-        let mut window_init = None;
-        let mut access = Access::Private;
-
-        if component.is_root_component.get() {
-            window_init = Some("sixtyfps::Window{sixtyfps::private_api::WindowRc()}".into());
-            // FIXME: many of the different component bindings need to access this
-            access = Access::Public;
-        } else {
-            constructor_member_initializers
-                .push("m_window(parent->m_window.window_handle())".into());
-        }
-
-        component_struct.members.push((
-            access,
-            Declaration::Var(Var {
-                ty: "sixtyfps::Window".into(),
-                name: "m_window".into(),
-                init: window_init,
-                ..Default::default()
-            }),
-        ));
-
-        component_struct.members.push((
-            access,
-            Declaration::Var(Var {
-                ty: format!(
-                    "vtable::VWeak<sixtyfps::private_api::ComponentVTable, {}>",
-                    component_id
-                ),
-                name: "self_weak".into(),
-                ..Var::default()
-            }),
-        ));
-    }
-
-    if let Some(parent_element) = component.parent_element.upgrade() {
-        if parent_element.borrow().repeated.as_ref().map_or(false, |r| !r.is_conditional_element) {
-            let cpp_model_data_type = model_data_type(&parent_element, diag);
-            component_struct.members.push((
-                Access::Private,
-                Declaration::Var(Var {
-                    ty: "sixtyfps::private_api::Property<int>".into(),
-                    name: "index".into(),
-                    ..Default::default()
-                }),
-            ));
-
-            component_struct.members.push((
-                Access::Private,
-                Declaration::Var(Var {
-                    ty: format!("sixtyfps::private_api::Property<{}>", cpp_model_data_type),
-                    name: "model_data".into(),
-                    ..Default::default()
-                }),
-            ));
-
-            let update_statements = vec!["index.set(i);".into(), "model_data.set(data);".into()];
-            component_struct.members.push((
-                Access::Public, // Because Repeater accesses it
-                Declaration::Function(Function {
-                    name: "update_data".into(),
-                    signature: format!(
-                        "(int i, const {} &data) const -> void",
-                        cpp_model_data_type
-                    ),
-                    statements: Some(update_statements),
-                    ..Function::default()
-                }),
-            ));
-        } else if parent_element.borrow().repeated.is_some() {
-            component_struct.members.push((
-                Access::Public, // Because Repeater accesses it
-                Declaration::Function(Function {
-                    name: "update_data".into(),
-                    signature: "(int, int) const -> void".into(),
-                    statements: Some(vec![]),
-                    ..Function::default()
-                }),
-            ));
-        }
-        let parent_component_id = self::component_id(
-            &component
-                .parent_element
-                .upgrade()
-                .unwrap()
-                .borrow()
-                .enclosing_component
-                .upgrade()
-                .unwrap(),
-        );
-        let parent_type = format!("class {} const *", parent_component_id);
-        constructor_arguments = format!("{} parent", parent_type);
-        constructor_code.push("this->parent = parent;".into());
-        component_struct.members.push((
-            Access::Public, // Because Repeater accesses it
-            Declaration::Var(Var {
-                ty: parent_type,
-                name: "parent".into(),
-                init: Some("nullptr".to_owned()),
-                ..Default::default()
-            }),
-        ));
-        component_struct.friends.push(parent_component_id);
-
-        if parent_element.borrow().repeated.as_ref().map_or(false, |r| r.is_listview.is_some()) {
-            let p_y = access_member(&component.root_element, "y", component, "this");
-            let p_height = access_member(&component.root_element, "height", component, "this");
-            let p_width = access_member(&component.root_element, "width", component, "this");
-
-            component_struct.members.push((
-                Access::Public, // Because Repeater accesses it
-                Declaration::Function(Function {
-                    name: "listview_layout".into(),
-                    signature:
-                        "(float *offset_y, const sixtyfps::private_api::Property<float> *viewport_width) const -> void"
-                            .to_owned(),
-                    statements: Some(vec![
-                        "float vp_w = viewport_width->get();".to_owned(),
-
-                        format!("{}.set(*offset_y);", p_y), // FIXME: shouldn't that be handled by apply layout?
-                        format!("*offset_y += {}.get();", p_height),
-                        format!("float w = {}.get();", p_width),
-                        "if (vp_w < w)".to_owned(),
-                        "    viewport_width->set(w);".to_owned(),
-                    ]),
-                    ..Function::default()
-                }),
-            ));
-        } else if parent_element.borrow().repeated.is_some() {
-            component_struct.members.push((
-                Access::Public, // Because Repeater accesses it
-                Declaration::Function(Function {
-                    name: "box_layout_data".into(),
-                    signature: "(sixtyfps::Orientation o) const -> sixtyfps::BoxLayoutCellData".to_owned(),
-                    statements: Some(vec!["return { layout_info({&static_vtable, const_cast<void *>(static_cast<const void *>(this))}, o) };".into()]),
-
-                    ..Function::default()
-                }),
-            ));
-        }
-    }
-
-    if component.is_root_component.get() {
-        component_struct.members.push((
-            Access::Public,
-            Declaration::Function(Function {
-                name: "show".into(),
-                signature: "()".into(),
-                statements: Some(vec!["m_window.show();".into()]),
-                ..Default::default()
-            }),
-        ));
-
-        component_struct.members.push((
-            Access::Public,
-            Declaration::Function(Function {
-                name: "hide".into(),
-                signature: "()".into(),
-                statements: Some(vec!["m_window.hide();".into()]),
-                ..Default::default()
-            }),
-        ));
-
-        component_struct.members.push((
-            Access::Public,
-            Declaration::Function(Function {
-                name: "window".into(),
-                signature: "() const -> sixtyfps::Window&".into(),
-                statements: Some(vec![format!(
-                    "return const_cast<{} *>(this)->m_window;",
-                    component_struct.name
-                )]),
-                ..Default::default()
-            }),
-        ));
-
-        component_struct.members.push((
-            Access::Public,
-            Declaration::Function(Function {
-                name: "run".into(),
-                signature: "()".into(),
-                statements: Some(vec![
-                    "show();".into(),
-                    "sixtyfps::run_event_loop();".into(),
-                    "hide();".into(),
-                ]),
-                ..Default::default()
-            }),
-        ));
-
-        init.insert(0, "m_window.window_handle().init_items(this, item_tree());".into());
-
-        component_struct.friends.push("sixtyfps::private_api::WindowRc".into());
-    }
-
-    struct TreeBuilder<'a> {
-        tree_array: Vec<String>,
-        children_visitor_cases: Vec<String>,
-        constructor_member_initializers: &'a mut Vec<String>,
-        root_ptr: String,
-        item_index_base: &'static str,
-        field_access: Access,
-        component_struct: &'a mut Struct,
-        component: &'a Rc<Component>,
-        root_component: &'a Rc<Component>,
-        diag: &'a mut BuildDiagnostics,
-        file: &'a mut File,
-        sub_components: &'a mut Vec<String>,
-        init: &'a mut Vec<String>,
-    }
-    impl<'a> super::ItemTreeBuilder for TreeBuilder<'a> {
-        // offsetof(App, sub_component) + offsetof(SubComponent, sub_sub_component) + ...
-        type SubComponentState = String;
-
-        fn push_repeated_item(
-            &mut self,
-            item_rc: &crate::object_tree::ElementRc,
-            repeater_count: u32,
-            parent_index: u32,
-            component_state: &Self::SubComponentState,
-        ) {
-            if component_state.is_empty() {
-                let item = item_rc.borrow();
-                let base_component = item.base_type.as_component();
-                let mut friends = Vec::new();
-                generate_component(
-                    self.file,
-                    base_component,
-                    self.root_component,
-                    self.diag,
-                    &mut friends,
-                );
-                self.sub_components.extend_from_slice(friends.as_slice());
-                self.sub_components.push(self::component_id(base_component));
-                self.component_struct.friends.append(&mut friends);
-                self.component_struct.friends.push(self::component_id(base_component));
-                let repeated = item.repeated.as_ref().unwrap();
-                handle_repeater(
-                    repeated,
-                    base_component,
-                    self.component,
-                    repeater_count,
-                    self.component_struct,
-                    self.init,
-                    &mut self.children_visitor_cases,
-                    self.diag,
-                );
-            }
-
-            self.tree_array.push(format!(
-                "sixtyfps::private_api::make_dyn_node({}, {})",
-                repeater_count, parent_index
-            ));
-        }
-        fn push_native_item(
-            &mut self,
-            item_rc: &ElementRc,
-            children_offset: u32,
-            parent_index: u32,
-            component_state: &Self::SubComponentState,
-        ) {
-            let item = item_rc.borrow();
-            if component_state.is_empty() {
-                handle_item(item_rc, self.field_access, self.component_struct);
-            }
-            if item.is_flickable_viewport {
-                self.tree_array.push(format!(
-                    "sixtyfps::private_api::make_item_node({}offsetof({}, {}) + offsetof(sixtyfps::cbindgen_private::Flickable, viewport), SIXTYFPS_GET_ITEM_VTABLE(RectangleVTable), {}, {}, {})",
-                    component_state,
-                    &self::component_id(&item.enclosing_component.upgrade().unwrap()),
-                    ident(&crate::object_tree::find_parent_element(item_rc).unwrap().borrow().id),
-                    item.children.len(),
-                    children_offset,
-                    parent_index,
-                ));
-            } else if let Type::Native(native_class) = &item.base_type {
-                self.tree_array.push(format!(
-                    "sixtyfps::private_api::make_item_node({}offsetof({}, {}), {}, {}, {}, {})",
-                    component_state,
-                    &self::component_id(&item.enclosing_component.upgrade().unwrap()),
-                    ident(&item.id),
-                    native_class.cpp_vtable_getter,
-                    item.children.len(),
-                    children_offset,
-                    parent_index,
-                ));
-            } else {
-                panic!("item don't have a native type");
-            }
-        }
-        fn enter_component(
-            &mut self,
-            item_rc: &ElementRc,
-            sub_component: &Rc<Component>,
-            children_offset: u32,
-            component_state: &Self::SubComponentState,
-        ) -> Self::SubComponentState {
-            let item = item_rc.borrow();
-            // Sub-components don't have an entry in the item tree themselves, but we propagate their tree offsets through the constructors.
-            if component_state.is_empty() {
-                let class_name = self::component_id(sub_component);
-                let member_name = ident(&item.id).into_owned();
-
-                self.init.push(format!("{}.init(self_weak.into_dyn());", member_name));
-
-                self.component_struct.members.push((
-                    self.field_access,
-                    Declaration::Var(Var {
-                        ty: class_name,
-                        name: member_name,
-                        ..Default::default()
-                    }),
-                ));
-
-                self.constructor_member_initializers.push(format!(
-                    "{member_name}{{{root_ptr}, {item_index_base}{local_index}, {item_index_base}{local_children_offset}}}",
-                    root_ptr = self.root_ptr,
-                    member_name = ident(&item.id),
-                    item_index_base = self.item_index_base,
-                    local_index = item.item_index.get().unwrap(),
-                    local_children_offset = children_offset
-                ));
-            };
-
-            format!(
-                "{}offsetof({}, {}) + ",
-                component_state,
-                &self::component_id(&item.enclosing_component.upgrade().unwrap()),
-                ident(&item.id)
-            )
-        }
-
-        fn enter_component_children(
-            &mut self,
-            item_rc: &ElementRc,
-            repeater_count: u32,
-            component_state: &Self::SubComponentState,
-            _sub_component_state: &Self::SubComponentState,
-        ) {
-            let item = item_rc.borrow();
-            if component_state.is_empty() {
-                let sub_component = item.sub_component().unwrap();
-                let member_name = ident(&item.id).into_owned();
-
-                let sub_component_repeater_count = sub_component.repeater_count();
-                if sub_component_repeater_count > 0 {
-                    let mut case_code = String::new();
-                    for local_repeater_index in 0..sub_component_repeater_count {
-                        write!(case_code, "case {}: ", repeater_count + local_repeater_index)
-                            .unwrap();
-                    }
-
-                    self.children_visitor_cases.push(format!(
-                        "\n        {case_code} {{
-                                return self->{id}.visit_dynamic_children(dyn_index - {base}, order, visitor);
-                            }}",
-                        case_code = case_code,
-                        id = member_name,
-                        base = repeater_count,
-                    ));
-                }
-            }
-        }
-    }
-
-    // For children of sub-components, the item index generated by the generate_item_indices pass
-    // starts at 1 (0 is the root element).
-    let item_index_base = if is_sub_component { "tree_index_of_first_child - 1 + " } else { "" };
-
-    let mut builder = TreeBuilder {
-        tree_array: vec![],
-        children_visitor_cases: vec![],
-        constructor_member_initializers: &mut constructor_member_initializers,
-        root_ptr: access_root_tokens(component),
-        item_index_base,
-        field_access,
-        component_struct: &mut component_struct,
-        component,
-        root_component,
-        diag,
+    generate_item_tree(
+        &mut component_struct,
+        &component.item_tree,
+        &component,
+        None,
+        component_id.clone(),
+        Access::Private, // Hide properties and other fields from the C++ API
         file,
-        sub_components,
-        init: &mut init,
-    };
-    if !component.is_global() {
-        super::build_item_tree(component, &String::new(), &mut builder);
-    }
+    );
 
-    let tree_array = std::mem::take(&mut builder.tree_array);
-    let children_visitor_cases = std::mem::take(&mut builder.children_visitor_cases);
-    drop(builder);
+    // Give generated sub-components, etc. access to our fields
 
-    super::handle_property_bindings_init(component, |elem, prop, binding| {
-        handle_property_binding(elem, prop, binding, &mut init)
-    });
-
-    if is_child_component || component.is_root_component.get() {
-        let maybe_constructor_param = if constructor_arguments.is_empty() { "" } else { "parent" };
-
-        let mut create_code = vec![
-            format!("auto self_rc = vtable::VRc<sixtyfps::private_api::ComponentVTable, {0}>::make({1});", component_id, maybe_constructor_param),
-            format!("auto self = const_cast<{0} *>(&*self_rc);", component_id),
-            "self->self_weak = vtable::VWeak(self_rc);".into(),
-            "self->init();".into(),
-        ];
-
-        if component.is_root_component.get() {
-            create_code.push(
-                "self->m_window.window_handle().set_component(**self->self_weak.lock());".into(),
-            );
-        }
-
-        create_code.extend(
-            component.setup_code.borrow().iter().map(|code| compile_expression(code, component)),
-        );
-        create_code
-            .push(format!("return sixtyfps::ComponentHandle<{0}>{{ self_rc }};", component_id));
-
-        component_struct.members.push((
-            Access::Public,
-            Declaration::Function(Function {
-                name: "create".into(),
-                signature: format!(
-                    "({}) -> sixtyfps::ComponentHandle<{}>",
-                    constructor_arguments, component_id
-                ),
-                statements: Some(create_code),
-                is_static: true,
-                ..Default::default()
-            }),
-        ));
-
-        let mut destructor = vec!["[[maybe_unused]] auto self = this;".to_owned()];
-
-        if is_child_component {
-            destructor.push("if (!parent) return;".to_owned())
-        }
-
-        destructor
-            .push("m_window.window_handle().free_graphics_resources(this, item_tree());".into());
-
-        component_struct.members.push((
-            Access::Public,
-            Declaration::Function(Function {
-                name: format!("~{}", component_id),
-                signature: "()".to_owned(),
-                is_constructor_or_destructor: true,
-                statements: Some(destructor),
-                ..Default::default()
-            }),
-        ));
-
-        generate_component_vtable(
-            &mut component_struct,
-            component_id.clone(),
-            component,
-            children_visitor_cases,
-            tree_array,
-            file,
-        );
-    } else if is_sub_component {
-        let root_ptr_type = format!("const {} *", self::component_id(root_component));
-
-        constructor_arguments =
-            format!("{} root, [[maybe_unused]] uintptr_t tree_index, [[maybe_unused]] uintptr_t tree_index_of_first_child", root_ptr_type);
-
-        component_struct.members.push((
-            Access::Private,
-            Declaration::Var(Var {
-                ty: "sixtyfps::Window".into(),
-                name: "m_window".into(),
-                ..Default::default()
-            }),
-        ));
-        constructor_member_initializers.push("m_window(root->m_window.window_handle())".into());
-
-        component_struct.members.push((
-            Access::Private,
-            Declaration::Var(Var {
-                ty: root_ptr_type,
-                name: "m_root".to_owned(),
-                ..Default::default()
-            }),
-        ));
-        constructor_member_initializers.push("m_root(root)".into());
-        constructor_code.push("(void)m_root;".into()); // silence warning about unused variable.
-
-        // self_weak is not really self in that case, it is a pointer to the enclosing component
-        component_struct.members.push((
-            Access::Private,
-            Declaration::Var(Var {
-                ty: "sixtyfps::cbindgen_private::ComponentWeak".into(),
-                name: "self_weak".into(),
-                ..Default::default()
-            }),
-        ));
-
-        component_struct.members.push((
-            Access::Private,
-            Declaration::Var(Var {
-                ty: "uintptr_t".to_owned(),
-                name: "tree_index_of_first_child".to_owned(),
-                ..Default::default()
-            }),
-        ));
-        constructor_member_initializers
-            .push("tree_index_of_first_child(tree_index_of_first_child)".into());
-        constructor_code.push("(void)this->tree_index_of_first_child;".into()); // silence warning about unused variable.
-
-        component_struct.members.push((
-            Access::Private,
-            Declaration::Var(Var {
-                ty: "uintptr_t".to_owned(),
-                name: "tree_index".to_owned(),
-                ..Default::default()
-            }),
-        ));
-        constructor_member_initializers.push("tree_index(tree_index)".into());
-        constructor_code.push("(void)this->tree_index;".into()); // silence warning about unused variable.
-
-        let root_element = component.root_element.borrow();
-        let get_root_item = if root_element.sub_component().is_some() {
-            format!("{}.root_item()", ident(&root_element.id))
-        } else {
-            format!("&{}", ident(&root_element.id))
+    for new_decl in file.declarations.iter().skip(old_declarations) {
+        match new_decl {
+            Declaration::Struct(struc @ Struct { .. }) => {
+                component_struct.friends.push(struc.name.clone());
+            }
+            _ => {}
         };
-        component_struct.members.push((
-            Access::Public,
-            Declaration::Function(Function {
-                name: "root_item".to_owned(),
-                signature: "() const".into(),
-                statements: Some(vec![format!("return {};", get_root_item)]),
-                ..Default::default()
-            }),
-        ));
-
-        component_struct.members.push((
-            Access::Public,
-            Declaration::Function(Function {
-                name: "layout_info".into(),
-                signature:
-                    "(sixtyfps::Orientation o, [[maybe_unused]] const sixtyfps::private_api::WindowRc *window_handle) const -> sixtyfps::LayoutInfo"
-                        .into(),
-                statements: Some(layout_info_function_body(
-                    component,
-                    "auto self = this;".to_owned(),
-                    Some("window_handle"),
-                )),
-                ..Default::default()
-            }),
-        ));
-
-        if !children_visitor_cases.is_empty() {
-            component_struct.members.push((
-                Access::Public,
-                Declaration::Function(Function {
-                    name: "visit_dynamic_children".into(),
-                    signature: "(intptr_t dyn_index, [[maybe_unused]] sixtyfps::private_api::TraversalOrder order, [[maybe_unused]] sixtyfps::private_api::ItemVisitorRefMut visitor) const -> int64_t".into(),
-                    statements: Some(vec![
-                        "    auto self = this;".to_owned(),
-                        format!("    switch(dyn_index) {{ {} }};", children_visitor_cases.join("")),
-                        "    std::abort();".to_owned(),
-                    ]),
-                    ..Default::default()
-                }),
-            ));
-        }
-
-        init_signature = "(sixtyfps::cbindgen_private::ComponentWeak enclosing_component)";
-        init.insert(0, "self_weak = enclosing_component;".to_string());
     }
 
-    // For globals nobody calls init(), so move the init code into the constructor.
-    // For everything else we want for whoever creates us to call init() when ready.
-    if component.is_global() {
-        constructor_code.extend(init);
-    } else {
-        component_struct.members.push((
-            if !component.is_global() && !is_sub_component {
-                Access::Private
-            } else {
-                Access::Public
-            },
-            Declaration::Function(Function {
-                name: "init".to_owned(),
-                signature: format!("{} -> void", init_signature),
-                statements: Some(init),
-                ..Default::default()
-            }),
-        ));
-    }
+    let declarations = generate_public_api_for_properties(&component.public_properties, &ctx);
+    component_struct.members.extend(declarations.into_iter().map(|decl| (Access::Public, decl)));
 
     component_struct.members.push((
-        if !component.is_global() && !is_sub_component { Access::Private } else { Access::Public },
-        Declaration::Function(Function {
-            name: component_id,
-            signature: format!("({})", constructor_arguments),
-            is_constructor_or_destructor: true,
-            statements: Some(constructor_code),
-            constructor_member_initializers,
+        // FIXME: many of the different component bindings need to access this
+        Access::Public,
+        Declaration::Var(Var {
+            ty: "sixtyfps::Window".into(),
+            name: "m_window".into(),
+            init: Some("sixtyfps::Window{sixtyfps::private_api::WindowRc()}".into()),
             ..Default::default()
         }),
     ));
 
-    let used_types = component.used_types.borrow();
+    component_struct.members.push((
+        Access::Public,
+        Declaration::Function(Function {
+            name: "show".into(),
+            signature: "()".into(),
+            statements: Some(vec!["m_window.show();".into()]),
+            ..Default::default()
+        }),
+    ));
 
-    let global_field_name = |glob| format!("global_{}", self::component_id(glob));
+    component_struct.members.push((
+        Access::Public,
+        Declaration::Function(Function {
+            name: "hide".into(),
+            signature: "()".into(),
+            statements: Some(vec!["m_window.hide();".into()]),
+            ..Default::default()
+        }),
+    ));
 
-    for glob in used_types.globals.iter() {
-        let ty = match &glob.root_element.borrow().base_type {
-            Type::Void => self::component_id(glob),
-            Type::Builtin(b) => {
-                format!("sixtyfps::cbindgen_private::{}", b.native_class.class_name)
-            }
-            _ => unreachable!(),
+    component_struct.members.push((
+        Access::Public,
+        Declaration::Function(Function {
+            name: "window".into(),
+            signature: "() const -> sixtyfps::Window&".into(),
+            statements: Some(vec![format!(
+                "return const_cast<{} *>(this)->m_window;",
+                component_struct.name
+            )]),
+            ..Default::default()
+        }),
+    ));
+
+    component_struct.members.push((
+        Access::Public,
+        Declaration::Function(Function {
+            name: "run".into(),
+            signature: "()".into(),
+            statements: Some(vec![
+                "show();".into(),
+                "sixtyfps::run_event_loop();".into(),
+                "hide();".into(),
+            ]),
+            ..Default::default()
+        }),
+    ));
+
+    component_struct.friends.push("sixtyfps::private_api::WindowRc".into());
+
+    component_struct
+        .friends
+        .extend(component.sub_components.iter().map(|sub_compo| ident(&sub_compo.name)));
+
+    component_struct.friends.extend(
+        component
+            .item_tree
+            .root
+            .repeated
+            .iter()
+            .map(|repeater| ident(&repeater.sub_tree.root.name)),
+    );
+
+    for glob in &component.globals {
+        let ty = if glob.is_builtin {
+            format!("sixtyfps::cbindgen_private::{}", glob.name)
+        } else {
+            ident(&glob.name)
         };
 
         component_struct.members.push((
-            Access::Private,
+            Access::Public, // FIXME
             Declaration::Var(Var {
                 ty: format!("std::shared_ptr<{}>", ty),
-                name: global_field_name(glob),
+                name: format!("global_{}", ident(&glob.name)),
                 init: Some(format!("std::make_shared<{}>()", ty)),
                 ..Default::default()
             }),
         ));
     }
+
     let mut global_accessor_function_body = Vec::new();
-
-    for glob in used_types
-        .globals
-        .iter()
-        .filter(|glob| glob.visible_in_public_api() && glob.requires_code_generation())
-    {
-        let mut accessor_statement = String::new();
-
-        if !global_accessor_function_body.is_empty() {
-            accessor_statement.push_str("else ");
-        }
-
-        accessor_statement.push_str(&format!(
-            "if constexpr(std::is_same_v<T, {}>) {{ return *{}.get(); }}",
-            self::component_id(glob),
-            global_field_name(glob)
-        ));
-
+    for glob in component.globals.iter().filter(|glob| glob.exported && !glob.is_builtin) {
+        let accessor_statement = format!(
+            "{0}if constexpr(std::is_same_v<T, {1}>) {{ return *global_{1}.get(); }}",
+            if global_accessor_function_body.is_empty() { "" } else { "else " },
+            ident(&glob.name),
+        );
         global_accessor_function_body.push(accessor_statement);
     }
-
     if !global_accessor_function_body.is_empty() {
         global_accessor_function_body.push(
             "else { static_assert(!sizeof(T*), \"The type is not global/or exported\"); }".into(),
@@ -1601,35 +775,115 @@ fn generate_component(
     file.declarations.push(Declaration::Struct(component_struct));
 }
 
-fn generate_component_vtable(
-    component_struct: &mut Struct,
-    component_id: String,
-    component: &Rc<Component>,
-    children_visitor_cases: Vec<String>,
-    tree_array: Vec<String>,
+fn generate_item_tree(
+    target_struct: &mut Struct,
+    sub_tree: &llr::ItemTree,
+    root: &llr::PublicComponent,
+    parent_ctx: Option<ParentCtx>,
+    item_tree_class_name: String,
+    field_access: Access,
     file: &mut File,
 ) {
-    component_struct
-        .friends
-        .push(format!("vtable::VRc<sixtyfps::private_api::ComponentVTable, {}>", component_id));
-    component_struct.members.push((
+    target_struct.friends.push(format!(
+        "vtable::VRc<sixtyfps::private_api::ComponentVTable, {}>",
+        item_tree_class_name
+    ));
+
+    generate_sub_component(
+        target_struct,
+        &sub_tree.root,
+        root,
+        parent_ctx.clone(),
+        field_access,
+        file,
+    );
+
+    let root_access = if parent_ctx.is_some() { "parent->root" } else { "self" };
+
+    let mut tree_array: Vec<String> = Default::default();
+
+    sub_tree.tree.visit_in_array(&mut |node, children_offset, parent_index| {
+        let parent_index = parent_index as u32;
+
+        if node.repeated {
+            assert_eq!(node.children.len(), 0);
+            let mut repeater_index = node.item_index;
+            let mut sub_component = &sub_tree.root;
+            for i in &node.sub_component_path {
+                repeater_index += sub_component.sub_components[*i].repeater_offset;
+                sub_component = &sub_component.sub_components[*i].ty;
+            }
+            tree_array.push(format!(
+                "sixtyfps::private_api::make_dyn_node({}, {})",
+                repeater_index, parent_index
+            ));
+        } else {
+            let mut compo_offset = String::new();
+            let mut sub_component = &sub_tree.root;
+            for i in &node.sub_component_path {
+                let next_sub_component_name = ident(&sub_component.sub_components[*i].name);
+                write!(
+                    compo_offset,
+                    "offsetof({}, {}) + ",
+                    ident(&sub_component.name),
+                    next_sub_component_name
+                )
+                .unwrap();
+                sub_component = &sub_component.sub_components[*i].ty;
+            }
+
+            let item = &sub_component.items[node.item_index];
+
+            if item.is_flickable_viewport {
+                compo_offset += "offsetof(sixtyfps::cbindgen_private::Flickable, viewport) + ";
+            }
+
+            let children_count = node.children.len() as u32;
+            let children_index = children_offset as u32;
+
+            tree_array.push(format!(
+                "sixtyfps::private_api::make_item_node({} offsetof({}, {}), {}, {}, {}, {})",
+                compo_offset,
+                &ident(&sub_component.name),
+                ident(&item.name),
+                item.ty.cpp_vtable_getter,
+                children_count,
+                children_index,
+                parent_index,
+            ));
+        }
+    });
+
+    let mut visit_children_statements = vec![
+        "static const auto dyn_visit = [] (const uint8_t *base,  [[maybe_unused]] sixtyfps::private_api::TraversalOrder order, [[maybe_unused]] sixtyfps::private_api::ItemVisitorRefMut visitor, [[maybe_unused]] uintptr_t dyn_index) -> uint64_t {".to_owned(),
+        format!("    [[maybe_unused]] auto self = reinterpret_cast<const {}*>(base);", item_tree_class_name)];
+
+    if target_struct.members.iter().any(|(_, declaration)| {
+        matches!(&declaration, Declaration::Function(func @ Function { .. }) if func.name == "visit_dynamic_children")
+    }) {
+        visit_children_statements
+            .push("    return self->visit_dynamic_children(dyn_index, order, visitor);".into());
+    } else {
+        visit_children_statements.push("    std::abort();".into());
+    }
+
+    visit_children_statements.extend([
+        "};".into(),
+        format!("auto self_rc = reinterpret_cast<const {}*>(component.instance)->self_weak.lock()->into_dyn();", item_tree_class_name),
+        "return sixtyfps::cbindgen_private::sixtyfps_visit_item_tree(&self_rc, item_tree() , index, order, visitor, dyn_visit);".to_owned(),
+    ]);
+
+    target_struct.members.push((
         Access::Private,
         Declaration::Function(Function {
             name: "visit_children".into(),
-            signature: "(sixtyfps::private_api::ComponentRef component, intptr_t index, sixtyfps::private_api::TraversalOrder order, sixtyfps::private_api::ItemVisitorRefMut visitor) -> int64_t".into(),
+            signature: "(sixtyfps::private_api::ComponentRef component, intptr_t index, sixtyfps::private_api::TraversalOrder order, sixtyfps::private_api::ItemVisitorRefMut visitor) -> uint64_t".into(),
             is_static: true,
-            statements: Some(vec![
-                "static const auto dyn_visit = [] (const uint8_t *base,  [[maybe_unused]] sixtyfps::private_api::TraversalOrder order, [[maybe_unused]] sixtyfps::private_api::ItemVisitorRefMut visitor, uintptr_t dyn_index) -> int64_t {".to_owned(),
-                format!("    [[maybe_unused]] auto self = reinterpret_cast<const {}*>(base);", component_id),
-                format!("    switch(dyn_index) {{ {} }};", children_visitor_cases.join("")),
-                "    std::abort();\n};".to_owned(),
-                format!("auto self_rc = reinterpret_cast<const {}*>(component.instance)->self_weak.lock()->into_dyn();", component_id),
-                "return sixtyfps::cbindgen_private::sixtyfps_visit_item_tree(&self_rc, item_tree() , index, order, visitor, dyn_visit);".to_owned(),
-            ]),
+            statements: Some(visit_children_statements),
             ..Default::default()
         }),
     ));
-    component_struct.members.push((
+    target_struct.members.push((
         Access::Private,
         Declaration::Function(Function {
             name: "get_item_ref".into(),
@@ -1641,9 +895,13 @@ fn generate_component_vtable(
             ..Default::default()
         }),
     ));
+
     let parent_item_from_parent_component = if let Some(parent_index) =
-        component.parent_element.upgrade().and_then(|e| e.borrow().item_index.get().copied())
-    {
+        parent_ctx.as_ref().and_then(|parent| {
+            parent
+                .repeater_index
+                .map(|idx| parent.ctx.current_sub_component.unwrap().repeated[idx].index_in_tree)
+        }) {
         format!(
             // that does not work when the parent is not a component with a ComponentVTable
             //"   *result = sixtyfps::private_api::parent_item(self->parent->self_weak.into_dyn(), self->parent->item_tree(), {});",
@@ -1653,14 +911,14 @@ fn generate_component_vtable(
     } else {
         "".to_owned()
     };
-    component_struct.members.push((
+    target_struct.members.push((
         Access::Private,
         Declaration::Function(Function {
             name: "parent_item".into(),
             signature: "(sixtyfps::private_api::ComponentRef component, uintptr_t index, sixtyfps::private_api::ItemWeak *result) -> void".into(),
             is_static: true,
             statements: Some(vec![
-                format!("auto self = reinterpret_cast<const {}*>(component.instance);", component_id),
+                format!("auto self = reinterpret_cast<const {}*>(component.instance);", item_tree_class_name),
                 "if (index == 0) {".into(),
                 parent_item_from_parent_component,
                 "   return;".into(),
@@ -1670,7 +928,8 @@ fn generate_component_vtable(
             ..Default::default()
         }),
     ));
-    component_struct.members.push((
+
+    target_struct.members.push((
         Access::Private,
         Declaration::Function(Function {
             name: "item_tree".into(),
@@ -1685,22 +944,24 @@ fn generate_component_vtable(
             ..Default::default()
         }),
     ));
-    component_struct.members.push((
+
+    target_struct.members.push((
         Access::Private,
         Declaration::Function(Function {
             name: "layout_info".into(),
             signature:
-                "([[maybe_unused]] sixtyfps::private_api::ComponentRef component, sixtyfps::Orientation o) -> sixtyfps::LayoutInfo"
+                "([[maybe_unused]] sixtyfps::private_api::ComponentRef component, sixtyfps::cbindgen_private::Orientation o) -> sixtyfps::cbindgen_private::LayoutInfo"
                     .into(),
             is_static: true,
-            statements: Some(layout_info_function_body(component, format!(
-                "[[maybe_unused]] auto self = reinterpret_cast<const {}*>(component.instance);",
-                component_id
-            ), None)),
+            statements: Some(vec![format!(
+                "return reinterpret_cast<const {}*>(component.instance)->layout_info(o);",
+                item_tree_class_name
+            )]),
             ..Default::default()
         }),
     ));
-    component_struct.members.push((
+
+    target_struct.members.push((
         Access::Public,
         Declaration::Var(Var {
             ty: "static const sixtyfps::private_api::ComponentVTable".to_owned(),
@@ -1708,109 +969,652 @@ fn generate_component_vtable(
             ..Default::default()
         }),
     ));
-    let root_elem = component.root_element.borrow();
 
-    let get_root_item_ref = if root_elem.sub_component().is_some() {
-        format!("this->{id}.root_item()", id = ident(&root_elem.id))
-    } else {
-        format!("&this->{id}", id = ident(&root_elem.id))
-    };
-
-    let mut builtin_root_element = component.root_element.clone();
-    while let Some(sub_component) = builtin_root_element.clone().borrow().sub_component() {
-        builtin_root_element = sub_component.root_element.clone();
-    }
-
-    component_struct.members.push((
-        Access::Public,
-        Declaration::Function(Function {
-            name: "root_item".into(),
-            signature: "() const -> sixtyfps::private_api::ItemRef".into(),
-            statements: Some(vec![format!(
-                "return {{ {vt}, const_cast<sixtyfps::cbindgen_private::{cpp_type}*>({root_item_ref}) }};",
-                cpp_type = builtin_root_element.borrow().base_type.as_native().class_name,
-                vt = builtin_root_element.borrow().base_type.as_native().cpp_vtable_getter,
-                root_item_ref = get_root_item_ref
-            )]),
-            ..Default::default()
-        }),
-    ));
     file.definitions.push(Declaration::Var(Var {
         ty: "const sixtyfps::private_api::ComponentVTable".to_owned(),
-        name: format!("{}::static_vtable", component_id),
+        name: format!("{}::static_vtable", item_tree_class_name),
         init: Some(format!(
             "{{ visit_children, get_item_ref, parent_item,  layout_info, sixtyfps::private_api::drop_in_place<{}>, sixtyfps::private_api::dealloc }}",
-            component_id)
+            item_tree_class_name)
         ),
         ..Default::default()
     }));
+
+    let mut create_parameters = Vec::new();
+    let mut init_parent_parameters = "";
+
+    if let Some(parent) = &parent_ctx {
+        let parent_type =
+            format!("class {} const *", ident(&parent.ctx.current_sub_component.unwrap().name));
+        create_parameters.push(format!("{} parent", parent_type));
+
+        init_parent_parameters = ", parent";
+    }
+
+    let mut create_code = vec![
+        format!(
+            "auto self_rc = vtable::VRc<sixtyfps::private_api::ComponentVTable, {0}>::make();",
+            target_struct.name
+        ),
+        format!("auto self = const_cast<{0} *>(&*self_rc);", target_struct.name),
+        "self->self_weak = vtable::VWeak(self_rc).into_dyn();".into(),
+    ];
+
+    if parent_ctx.is_none() {
+        create_code.extend([
+            format!("{}->m_window.window_handle().set_component(*self_rc);", root_access),
+            format!("{}->m_window.window_handle().init_items(self, item_tree());", root_access),
+        ]);
+    }
+
+    create_code.extend([
+        format!("self->init({}, self->self_weak, 0, 1 {});", root_access, init_parent_parameters),
+        format!("return sixtyfps::ComponentHandle<{0}>{{ self_rc }};", target_struct.name),
+    ]);
+
+    target_struct.members.push((
+        Access::Public,
+        Declaration::Function(Function {
+            name: "create".into(),
+            signature: format!(
+                "({}) -> sixtyfps::ComponentHandle<{}>",
+                create_parameters.join(","),
+                target_struct.name
+            ),
+            statements: Some(create_code),
+            is_static: true,
+            ..Default::default()
+        }),
+    ));
+
+    let mut destructor = vec!["auto self = this;".to_owned()];
+
+    destructor.push(format!(
+        "{}->m_window.window_handle().free_graphics_resources(self, item_tree());",
+        root_access
+    ));
+
+    target_struct.members.push((
+        Access::Public,
+        Declaration::Function(Function {
+            name: format!("~{}", target_struct.name),
+            signature: "()".to_owned(),
+            is_constructor_or_destructor: true,
+            statements: Some(destructor),
+            ..Default::default()
+        }),
+    ));
 }
 
-/// Retruns the tokens needed to access the root component (where global singletons are located).
-/// This is needed for the `init()` calls on sub-components, that take the root as a parameter.
-fn access_root_tokens(component: &Rc<Component>) -> String {
-    if component.is_global() {
-        return "\n#error can't access root from globals\n".into();
-    } else if component.is_root_component.get() {
-        return "this".into();
-    } else if component.is_sub_component() {
-        return "root".into();
+fn generate_sub_component(
+    target_struct: &mut Struct,
+    component: &llr::SubComponent,
+    root: &llr::PublicComponent,
+    parent_ctx: Option<ParentCtx>,
+    field_access: Access,
+    file: &mut File,
+) {
+    let root_ptr_type = format!("const {} *", ident(&root.item_tree.root.name));
+
+    let mut init_parameters = vec![
+        format!("{} root", root_ptr_type),
+        "sixtyfps::cbindgen_private::ComponentWeak enclosing_component".into(),
+        "uintptr_t tree_index".into(),
+        "uintptr_t tree_index_of_first_child".into(),
+    ];
+
+    let mut init: Vec<String> =
+        vec!["auto self = this;".into(), "self->self_weak = enclosing_component;".into()];
+
+    target_struct.members.push((
+        Access::Public,
+        Declaration::Var(Var {
+            ty: "sixtyfps::cbindgen_private::ComponentWeak".into(),
+            name: "self_weak".into(),
+            ..Default::default()
+        }),
+    ));
+
+    target_struct.members.push((
+        field_access,
+        Declaration::Var(Var {
+            ty: root_ptr_type.clone(),
+            name: "root".to_owned(),
+            ..Default::default()
+        }),
+    ));
+    init.push("self->root = root;".into());
+
+    target_struct.members.push((
+        field_access,
+        Declaration::Var(Var {
+            ty: "uintptr_t".to_owned(),
+            name: "tree_index_of_first_child".to_owned(),
+            ..Default::default()
+        }),
+    ));
+    init.push("this->tree_index_of_first_child = tree_index_of_first_child;".into());
+
+    target_struct.members.push((
+        field_access,
+        Declaration::Var(Var {
+            ty: "uintptr_t".to_owned(),
+            name: "tree_index".to_owned(),
+            ..Default::default()
+        }),
+    ));
+    init.push("self->tree_index = tree_index;".into());
+
+    if let Some(parent_ctx) = &parent_ctx {
+        let parent_type =
+            format!("class {} const *", ident(&parent_ctx.ctx.current_sub_component.unwrap().name));
+        init_parameters.push(format!("{} parent", parent_type));
+
+        target_struct.members.push((
+            field_access,
+            Declaration::Var(Var {
+                ty: parent_type,
+                name: "parent".to_owned(),
+                ..Default::default()
+            }),
+        ));
+        init.push("self->parent = parent;".into());
     }
-    let mut tokens = "parent".into();
-    let mut compo = component.clone();
-    loop {
-        let parent_compo = compo
-            .parent_element
-            .upgrade()
-            .expect("not the root and not a sub_component must have a parent")
-            .borrow()
-            .enclosing_component
-            .upgrade()
-            .unwrap();
-        if parent_compo.is_root_component.get() {
-            return tokens;
-        } else if parent_compo.is_sub_component() {
-            tokens += "->m_root";
-            return tokens;
+
+    let ctx = EvaluationContext::new_sub_component(
+        root,
+        component,
+        "self->root".into(),
+        parent_ctx.clone(),
+    );
+
+    component.popup_windows.iter().for_each(|c| {
+        let component_id = ident(&c.root.name);
+        let mut popup_struct = Struct { name: component_id.clone(), ..Default::default() };
+        generate_item_tree(
+            &mut popup_struct,
+            &c,
+            &root,
+            Some(ParentCtx::new(&ctx, None)),
+            component_id,
+            Access::Public,
+            file,
+        );
+        file.definitions.extend(popup_struct.extract_definitions().collect::<Vec<_>>());
+        file.declarations.push(Declaration::Struct(popup_struct));
+    });
+
+    for property in &component.properties {
+        let cpp_name = ident(&property.name);
+
+        let ty = if let Type::Callback { args, return_type } = &property.ty {
+            let param_types = args.iter().map(|t| t.cpp_type().unwrap()).collect::<Vec<_>>();
+            let return_type =
+                return_type.as_ref().map_or("void".to_owned(), |t| t.cpp_type().unwrap());
+            format!("sixtyfps::private_api::Callback<{}({})>", return_type, param_types.join(", "))
+        } else {
+            format!("sixtyfps::private_api::Property<{}>", property.ty.cpp_type().unwrap())
+        };
+
+        target_struct.members.push((
+            field_access,
+            Declaration::Var(Var { ty, name: cpp_name, ..Default::default() }),
+        ));
+    }
+
+    let mut children_visitor_cases = Vec::new();
+
+    let mut subcomponent_init_code = Vec::new();
+    for sub in &component.sub_components {
+        let field_name = ident(&sub.name);
+        let local_tree_index: u32 = sub.index_in_tree as _;
+        let local_index_of_first_child: u32 = sub.index_of_first_child_in_tree as _;
+
+        // For children of sub-components, the item index generated by the generate_item_indices pass
+        // starts at 1 (0 is the root element).
+        let global_index = if local_tree_index == 0 {
+            "tree_index".into()
+        } else {
+            format!("tree_index_of_first_child + {} - 1", local_tree_index)
+        };
+        let global_children = if local_index_of_first_child == 0 {
+            "0".into()
+        } else {
+            format!("tree_index_of_first_child + {} - 1", local_index_of_first_child)
+        };
+
+        subcomponent_init_code.push(format!(
+            "this->{}.init(root, self_weak.into_dyn(), {}, {});",
+            field_name, global_index, global_children
+        ));
+
+        let sub_component_repeater_count = sub.ty.repeater_count();
+        if sub_component_repeater_count > 0 {
+            let mut case_code = String::new();
+            let repeater_offset = sub.repeater_offset;
+
+            for local_repeater_index in 0..sub_component_repeater_count {
+                write!(case_code, "case {}: ", repeater_offset + local_repeater_index).unwrap();
+            }
+
+            children_visitor_cases.push(format!(
+                "\n        {case_code} {{
+                        return self->{id}.visit_dynamic_children(dyn_index - {base}, order, visitor);
+                    }}",
+                case_code = case_code,
+                id = field_name,
+                base = repeater_offset,
+            ));
         }
-        compo = parent_compo;
-        tokens += "->parent";
-    }
-}
 
-fn component_id(component: &Rc<Component>) -> String {
-    if component.is_global() {
-        ident(&component.root_element.borrow().id).into_owned()
-    } else if component.id.is_empty() {
-        format!("Component_{}", ident(&component.root_element.borrow().id))
-    } else if component.is_sub_component() {
-        ident(&format!("{}_{}", component.id, component.root_element.borrow().id)).into_owned()
-    } else {
-        ident(&component.id).into_owned()
+        target_struct.members.push((
+            field_access,
+            Declaration::Var(Var {
+                ty: ident(&sub.ty.name),
+                name: field_name,
+                ..Default::default()
+            }),
+        ));
     }
-}
 
-fn model_data_type(parent_element: &ElementRc, diag: &mut BuildDiagnostics) -> String {
-    if parent_element.borrow().repeated.as_ref().unwrap().is_conditional_element {
-        return "int".into();
+    for (prop1, prop2) in &component.two_way_bindings {
+        init.push(format!(
+            "sixtyfps::private_api::Property<{ty}>::link_two_way(&{p1}, &{p2});",
+            ty = ctx.property_ty(prop1).cpp_type().unwrap(),
+            p1 = access_member(prop1, &ctx),
+            p2 = access_member(prop2, &ctx),
+        ));
     }
-    let model_data_type = crate::expression_tree::Expression::RepeaterModelReference {
-        element: Rc::downgrade(parent_element),
+
+    let mut properties_init_code = Vec::new();
+    for (prop, expression) in &component.property_init {
+        handle_property_init(prop, expression, &mut properties_init_code, &ctx)
     }
-    .ty();
-    model_data_type.cpp_type().unwrap_or_else(|| {
-        diag.push_error_with_span(
-            format!("Cannot map property type {} to C++", model_data_type),
-            parent_element
-                .borrow()
-                .node
-                .as_ref()
-                .map(|n| n.to_source_location())
-                .unwrap_or_default(),
+
+    for item in &component.items {
+        if item.is_flickable_viewport {
+            continue;
+        }
+        target_struct.members.push((
+            field_access,
+            Declaration::Var(Var {
+                ty: format!("sixtyfps::cbindgen_private::{}", ident(&item.ty.class_name)),
+                name: ident(&item.name),
+                init: Some("{}".to_owned()),
+                ..Default::default()
+            }),
+        ));
+    }
+
+    for (idx, repeated) in component.repeated.iter().enumerate() {
+        let data_type = if let Some(data_prop) = repeated.data_prop {
+            repeated.sub_tree.root.properties[data_prop].ty.clone()
+        } else {
+            Type::Int32
+        };
+
+        generate_repeated_component(
+            &repeated,
+            root,
+            ParentCtx::new(&ctx, Some(idx)),
+            &data_type,
+            file,
         );
 
-        String::default()
-    })
+        let repeater_id = format!("repeater_{}", idx);
+
+        let mut model = compile_expression(&repeated.model, &ctx);
+        if repeated.model.ty(&ctx) == Type::Bool {
+            // bool converts to int
+            // FIXME: don't do a heap allocation here
+            model = format!("std::make_shared<sixtyfps::private_api::IntModel>({})", model)
+        }
+
+        // FIXME: optimize  if repeated.model.is_constant()
+        properties_init_code.push(format!(
+            "self->{repeater_id}.set_model_binding([self] {{ (void)self; return {model}; }});",
+            repeater_id = repeater_id,
+            model = model,
+        ));
+
+        let ensure_updated = if let Some(listview) = &repeated.listview {
+            let vp_y = access_member(&listview.viewport_y, &ctx);
+            let vp_h = access_member(&listview.viewport_height, &ctx);
+            let lv_h = access_member(&listview.listview_height, &ctx);
+            let vp_w = access_member(&listview.viewport_width, &ctx);
+            let lv_w = access_member(&listview.listview_width, &ctx);
+
+            format!(
+                "self->{}.ensure_updated_listview(self, &{}, &{}, &{}, {}.get(), {}.get());",
+                repeater_id, vp_w, vp_h, vp_y, lv_w, lv_h
+            )
+        } else {
+            format!("self->{id}.ensure_updated(self);", id = repeater_id)
+        };
+
+        children_visitor_cases.push(format!(
+            "\n        case {i}: {{
+                {e_u}
+                return self->{id}.visit(order, visitor);
+            }}",
+            id = repeater_id,
+            i = idx,
+            e_u = ensure_updated,
+        ));
+
+        target_struct.members.push((
+            Access::Private,
+            Declaration::Var(Var {
+                ty: format!(
+                    "sixtyfps::private_api::Repeater<class {}, {}>",
+                    ident(&repeated.sub_tree.root.name),
+                    data_type.cpp_type().unwrap(),
+                ),
+                name: repeater_id,
+                ..Default::default()
+            }),
+        ));
+    }
+
+    init.extend(subcomponent_init_code);
+    init.extend(properties_init_code);
+    init.extend(component.init_code.iter().map(|e| compile_expression(e, &ctx)));
+
+    target_struct.members.push((
+        field_access,
+        Declaration::Function(Function {
+            name: "init".to_owned(),
+            signature: format!("({}) -> void", init_parameters.join(",")),
+            statements: Some(init),
+            ..Default::default()
+        }),
+    ));
+
+    target_struct.members.push((
+        field_access,
+        Declaration::Function(Function {
+            name: "layout_info".into(),
+            signature: "(sixtyfps::cbindgen_private::Orientation o) const -> sixtyfps::cbindgen_private::LayoutInfo"
+                .into(),
+            statements: Some(vec![
+                "[[maybe_unused]] auto self = this;".into(),
+                format!(
+                    "return o == sixtyfps::cbindgen_private::Orientation::Horizontal ? {} : {};",
+                    compile_expression(&component.layout_info_h, &ctx),
+                    compile_expression(&component.layout_info_v, &ctx)
+                ),
+            ]),
+            ..Default::default()
+        }),
+    ));
+
+    if !children_visitor_cases.is_empty() {
+        target_struct.members.push((
+            field_access,
+            Declaration::Function(Function {
+                name: "visit_dynamic_children".into(),
+                signature: "(intptr_t dyn_index, [[maybe_unused]] sixtyfps::private_api::TraversalOrder order, [[maybe_unused]] sixtyfps::private_api::ItemVisitorRefMut visitor) const -> uint64_t".into(),
+                statements: Some(vec![
+                    "    auto self = this;".to_owned(),
+                    format!("    switch(dyn_index) {{ {} }};", children_visitor_cases.join("")),
+                    "    std::abort();".to_owned(),
+                ]),
+                ..Default::default()
+            }),
+        ));
+    }
+}
+
+fn generate_repeated_component(
+    repeated: &llr::RepeatedElement,
+    root: &llr::PublicComponent,
+    parent_ctx: ParentCtx,
+    model_data_type: &Type,
+    file: &mut File,
+) {
+    let repeater_id = ident(&repeated.sub_tree.root.name);
+    let mut repeater_struct = Struct { name: repeater_id.clone(), ..Default::default() };
+    generate_item_tree(
+        &mut repeater_struct,
+        &repeated.sub_tree,
+        root,
+        Some(parent_ctx.clone()),
+        repeater_id.clone(),
+        Access::Public,
+        file,
+    );
+
+    let ctx = EvaluationContext {
+        public_component: root,
+        current_sub_component: Some(&repeated.sub_tree.root),
+        current_global: None,
+        generator_state: "self".into(),
+        parent: Some(parent_ctx),
+        argument_types: &[],
+    };
+
+    let access_prop = |&property_index| {
+        access_member(
+            &llr::PropertyReference::Local { sub_component_path: vec![], property_index },
+            &ctx,
+        )
+    };
+    let index_prop = repeated.index_prop.iter().map(access_prop);
+    let data_prop = repeated.data_prop.iter().map(access_prop);
+
+    let mut update_statements = vec!["[[maybe_unused]] auto self = this;".into()];
+    update_statements.extend(index_prop.map(|prop| format!("{}.set(i);", prop)));
+    update_statements.extend(data_prop.map(|prop| format!("{}.set(data);", prop)));
+
+    repeater_struct.members.push((
+        Access::Public, // Because Repeater accesses it
+        Declaration::Function(Function {
+            name: "update_data".into(),
+            signature: format!(
+                "([[maybe_unused]] int i, [[maybe_unused]] const {} &data) const -> void",
+                model_data_type.cpp_type().unwrap()
+            ),
+            statements: Some(update_statements),
+            ..Function::default()
+        }),
+    ));
+
+    if let Some(listview) = &repeated.listview {
+        let p_y = access_member(&listview.prop_y, &ctx);
+        let p_height = access_member(&listview.prop_height, &ctx);
+        let p_width = access_member(&listview.prop_width, &ctx);
+
+        repeater_struct.members.push((
+            Access::Public, // Because Repeater accesses it
+            Declaration::Function(Function {
+                name: "listview_layout".into(),
+                signature:
+                    "(float *offset_y, const sixtyfps::private_api::Property<float> *viewport_width) const -> void"
+                        .to_owned(),
+                statements: Some(vec![
+                    "[[maybe_unused]] auto self = this;".into(),
+                    "float vp_w = viewport_width->get();".to_owned(),
+
+                    format!("{}.set(*offset_y);", p_y), // FIXME: shouldn't that be handled by apply layout?
+                    format!("*offset_y += {}.get();", p_height),
+                    format!("float w = {}.get();", p_width),
+                    "if (vp_w < w)".to_owned(),
+                    "    viewport_width->set(w);".to_owned(),
+                ]),
+                ..Function::default()
+            }),
+        ));
+    } else {
+        repeater_struct.members.push((
+            Access::Public, // Because Repeater accesses it
+            Declaration::Function(Function {
+                name: "box_layout_data".into(),
+                signature: "(sixtyfps::cbindgen_private::Orientation o) const -> sixtyfps::cbindgen_private::BoxLayoutCellData".to_owned(),
+                statements: Some(vec!["return { layout_info({&static_vtable, const_cast<void *>(static_cast<const void *>(this))}, o) };".into()]),
+
+                ..Function::default()
+            }),
+        ));
+    }
+
+    file.definitions.extend(repeater_struct.extract_definitions().collect::<Vec<_>>());
+    file.declarations.push(Declaration::Struct(repeater_struct));
+}
+
+fn generate_global(file: &mut File, global: &llr::GlobalComponent, root: &llr::PublicComponent) {
+    let mut global_struct = Struct { name: ident(&global.name), ..Default::default() };
+
+    for property in &global.properties {
+        let cpp_name = ident(&property.name);
+
+        let ty = if let Type::Callback { args, return_type } = &property.ty {
+            let param_types = args.iter().map(|t| t.cpp_type().unwrap()).collect::<Vec<_>>();
+            let return_type =
+                return_type.as_ref().map_or("void".to_owned(), |t| t.cpp_type().unwrap());
+            format!("sixtyfps::private_api::Callback<{}({})>", return_type, param_types.join(", "))
+        } else {
+            format!("sixtyfps::private_api::Property<{}>", property.ty.cpp_type().unwrap())
+        };
+
+        global_struct.members.push((
+            // FIXME: this is public (and also was public in the pre-llr generator) because other generated code accesses the
+            // fields directly. But it shouldn't be from an API point of view since the same `global_struct` class is public API
+            // when the global is exported and exposed in the public component.
+            Access::Public,
+            Declaration::Var(Var { ty, name: cpp_name, ..Default::default() }),
+        ));
+    }
+
+    let mut init = vec![];
+
+    let ctx = EvaluationContext {
+        public_component: root,
+        current_sub_component: None,
+        current_global: Some(global),
+        generator_state: "\n#error can't access root from global\n".into(),
+        parent: None,
+        argument_types: &[],
+    };
+
+    for (property_index, expression) in global.init_values.iter().enumerate() {
+        if let Some(expression) = expression.as_ref() {
+            handle_property_init(
+                &llr::PropertyReference::Local { sub_component_path: vec![], property_index },
+                expression,
+                &mut init,
+                &ctx,
+            )
+        }
+    }
+
+    global_struct.members.push((
+        Access::Public,
+        Declaration::Function(Function {
+            name: ident(&global.name),
+            signature: "()".into(),
+            is_constructor_or_destructor: true,
+            statements: Some(init),
+            ..Default::default()
+        }),
+    ));
+
+    let declarations = generate_public_api_for_properties(&global.public_properties, &ctx);
+    global_struct.members.extend(declarations.into_iter().map(|decl| (Access::Public, decl)));
+
+    file.definitions.extend(global_struct.extract_definitions().collect::<Vec<_>>());
+    file.declarations.push(Declaration::Struct(global_struct));
+}
+
+fn generate_public_api_for_properties(
+    public_properties: &llr::PublicProperties,
+    ctx: &EvaluationContext,
+) -> Vec<Declaration> {
+    let mut declarations = Vec::new();
+    for (p, (ty, r)) in public_properties.iter() {
+        let prop_ident = ident(p);
+
+        let access = access_member(r, &ctx);
+
+        if let Type::Callback { args, return_type } = ty {
+            let param_types = args.iter().map(|t| t.cpp_type().unwrap()).collect::<Vec<_>>();
+            let return_type = return_type.as_ref().map_or("void".into(), |t| t.cpp_type().unwrap());
+            let callback_emitter = vec![
+                "[[maybe_unused]] auto self = this;".into(),
+                format!(
+                    "return {}.call({});",
+                    access,
+                    (0..args.len()).map(|i| format!("arg_{}", i)).join(", ")
+                ),
+            ];
+            declarations.push(Declaration::Function(Function {
+                name: format!("invoke_{}", ident(p)),
+                signature: format!(
+                    "({}) const -> {}",
+                    param_types
+                        .iter()
+                        .enumerate()
+                        .map(|(i, ty)| format!("{} arg_{}", ty, i))
+                        .join(", "),
+                    return_type
+                ),
+                statements: Some(callback_emitter),
+                ..Default::default()
+            }));
+            declarations.push(Declaration::Function(Function {
+                name: format!("on_{}", ident(p)),
+                template_parameters: Some("typename Functor".into()),
+                signature: "(Functor && callback_handler) const".into(),
+                statements: Some(vec![
+                    "[[maybe_unused]] auto self = this;".into(),
+                    format!("{}.set_handler(std::forward<Functor>(callback_handler));", access),
+                ]),
+                ..Default::default()
+            }));
+        } else {
+            let cpp_property_type = ty.cpp_type().expect("Invalid type in public properties");
+            let prop_getter: Vec<String> = vec![
+                "[[maybe_unused]] auto self = this;".into(),
+                format!("return {}.get();", access),
+            ];
+            declarations.push(Declaration::Function(Function {
+                name: format!("get_{}", &prop_ident),
+                signature: format!("() const -> {}", &cpp_property_type),
+                statements: Some(prop_getter),
+                ..Default::default()
+            }));
+
+            let prop_setter: Vec<String> = vec![
+                "[[maybe_unused]] auto self = this;".into(),
+                property_set_value_code(r, "value", ctx) + ";",
+            ];
+            declarations.push(Declaration::Function(Function {
+                name: format!("set_{}", &prop_ident),
+                signature: format!("(const {} &value) const", &cpp_property_type),
+                statements: Some(prop_setter),
+                ..Default::default()
+            }));
+        }
+    }
+    declarations
+}
+
+fn follow_sub_component_path<'a>(
+    root: &'a llr::SubComponent,
+    sub_component_path: &[usize],
+) -> (String, &'a llr::SubComponent) {
+    let mut compo_path = String::new();
+    let mut sub_component = root;
+    for i in sub_component_path {
+        let sub_component_name = ident(&sub_component.sub_components[*i].name);
+        write!(compo_path, "{}.", sub_component_name).unwrap();
+        sub_component = &sub_component.sub_components[*i].ty;
+    }
+    (compo_path, sub_component)
+}
+
+fn access_window_field(ctx: &EvaluationContext) -> String {
+    let root = &ctx.generator_state;
+    format!("{}->window().window_handle()", root)
 }
 
 /// Returns the code that can access the given property (but without the set or get)
@@ -1820,137 +1624,117 @@ fn model_data_type(parent_element: &ElementRc, diag: &mut BuildDiagnostics) -> S
 /// let access = access_member(...);
 /// format!("{}.get()", access)
 /// ```
-fn access_member(
-    element: &ElementRc,
-    name: &str,
-    component: &Rc<Component>,
-    component_cpp: &str,
-) -> String {
-    let e = element.borrow();
-    let enclosing_component = e.enclosing_component.upgrade().unwrap();
-    if Rc::ptr_eq(component, &enclosing_component) {
-        if e.property_declarations.contains_key(name) || name.is_empty() || component.is_global() {
-            format!("{}->{}", component_cpp, ident(name))
-        } else if e.is_flickable_viewport {
-            format!(
-                "{}->{}.viewport.{}",
-                component_cpp,
-                ident(&crate::object_tree::find_parent_element(element).unwrap().borrow().id),
-                ident(name)
-            )
-        } else if let Some(sub_component) = e.sub_component() {
-            if sub_component.root_element.borrow().property_declarations.contains_key(name) {
-                format!("(*{}->{}.get_{}())", component_cpp, ident(&e.id), ident(name))
+fn access_member(reference: &llr::PropertyReference, ctx: &EvaluationContext) -> String {
+    fn in_native_item(
+        ctx: &EvaluationContext,
+        sub_component_path: &[usize],
+        item_index: usize,
+        prop_name: &str,
+        path: &str,
+    ) -> String {
+        let (compo_path, sub_component) =
+            follow_sub_component_path(ctx.current_sub_component.unwrap(), sub_component_path);
+        let item_name = ident(&sub_component.items[item_index].name);
+        if prop_name.is_empty() {
+            // then this is actually a reference to the element itself
+            format!("{}->{}{}", path, compo_path, item_name)
+        } else {
+            let property_name = ident(&prop_name);
+            let flick = sub_component.items[item_index]
+                .is_flickable_viewport
+                .then(|| "viewport.")
+                .unwrap_or_default();
+            format!("{}->{}{}.{}{}", path, compo_path, item_name, flick, property_name)
+        }
+    }
+
+    match reference {
+        llr::PropertyReference::Local { sub_component_path, property_index } => {
+            if let Some(sub_component) = ctx.current_sub_component {
+                let (compo_path, sub_component) =
+                    follow_sub_component_path(sub_component, sub_component_path);
+                let property_name = ident(&sub_component.properties[*property_index].name);
+                format!("self->{}{}", compo_path, property_name)
+            } else if let Some(current_global) = ctx.current_global {
+                format!("this->{}", ident(&current_global.properties[*property_index].name))
             } else {
-                access_member(
-                    &sub_component.root_element,
-                    name,
-                    sub_component,
-                    &format!("(&{}->{})", component_cpp, ident(&e.id),),
-                )
+                unreachable!()
             }
-        } else {
-            format!("{}->{}.{}", component_cpp, ident(&e.id), ident(name))
         }
-    } else if enclosing_component.is_global() {
-        let mut top_level_component = component.clone();
-        let mut component_cpp = component_cpp.to_owned();
-        while let Some(p) = top_level_component.parent_element.upgrade() {
-            top_level_component = p.borrow().enclosing_component.upgrade().unwrap();
-            component_cpp = format!("{}->parent", component_cpp);
+        llr::PropertyReference::InNativeItem { sub_component_path, item_index, prop_name } => {
+            in_native_item(ctx, sub_component_path, *item_index, prop_name, "self")
         }
-        if top_level_component.is_sub_component() {
-            component_cpp = format!("{}->m_root", component_cpp);
+        llr::PropertyReference::InParent { level, parent_reference } => {
+            let mut ctx = ctx;
+            let mut path = "self".to_string();
+            for _ in 0..level.get() {
+                write!(path, "->parent").unwrap();
+                ctx = ctx.parent.as_ref().unwrap().ctx;
+            }
+
+            match &**parent_reference {
+                llr::PropertyReference::Local { sub_component_path, property_index } => {
+                    let sub_component = ctx.current_sub_component.unwrap();
+                    let (compo_path, sub_component) =
+                        follow_sub_component_path(sub_component, sub_component_path);
+                    let property_name = ident(&sub_component.properties[*property_index].name);
+                    format!("{}->{}{}", path, compo_path, property_name)
+                }
+                llr::PropertyReference::InNativeItem {
+                    sub_component_path,
+                    item_index,
+                    prop_name,
+                } => in_native_item(ctx, sub_component_path, *item_index, prop_name, &path),
+                llr::PropertyReference::InParent { .. } | llr::PropertyReference::Global { .. } => {
+                    unreachable!()
+                }
+            }
         }
-        let global_comp =
-            format!("{}->global_{}", component_cpp, component_id(&enclosing_component));
-        access_member(element, name, &enclosing_component, &global_comp)
-    } else {
-        access_member(
-            element,
-            name,
-            &component
-                .parent_element
-                .upgrade()
-                .unwrap()
-                .borrow()
-                .enclosing_component
-                .upgrade()
-                .unwrap(),
-            &format!("{}->parent", component_cpp),
-        )
+        llr::PropertyReference::Global { global_index, property_index } => {
+            let root_access = &ctx.generator_state;
+            let global = &ctx.public_component.globals[*global_index];
+            let global_id = format!("global_{}", ident(&global.name));
+            let property_name = ident(
+                &ctx.public_component.globals[*global_index].properties[*property_index].name,
+            );
+            format!("{}->{}->{}", root_access, global_id, property_name)
+        }
     }
 }
 
-/// Call access_member  for a NamedReference
-fn access_named_reference(
-    nr: &NamedReference,
-    component: &Rc<Component>,
-    component_cpp: &str,
-) -> String {
-    access_member(&nr.element(), nr.name(), component, component_cpp)
-}
-
-/// Returns the code that can access the component of the given element
-fn access_element_component<'a>(
-    element: &ElementRc,
-    current_component: &Rc<Component>,
-    component_cpp: &'a str,
-) -> Cow<'a, str> {
-    let e = element.borrow();
-    let enclosing_component = e.enclosing_component.upgrade().unwrap();
-    if Rc::ptr_eq(current_component, &enclosing_component) {
-        component_cpp.into()
-    } else {
-        access_element_component(
-            element,
-            &current_component
-                .parent_element
-                .upgrade()
-                .unwrap()
-                .borrow()
-                .enclosing_component
-                .upgrade()
-                .unwrap(),
-            &format!("{}->parent", component_cpp),
-        )
-        .to_string()
-        .into()
-    }
-}
-
-// Returns an expression that will compute the absolute item index in the item tree for a
-// given element. For elements of a child component or the root component, the item_index
-// is already absolute within the corresponding item tree. For sub-components we return an
-// expression that computes the value at run-time.
-fn absolute_element_item_index_expression(element: &ElementRc) -> String {
-    let element = element.borrow();
-    let local_index = element.item_index.get().unwrap();
-    let enclosing_component = element.enclosing_component.upgrade().unwrap();
-    if enclosing_component.is_sub_component() {
-        if *local_index == 0 {
-            "this->tree_index".to_string()
-        } else if *local_index == 1 {
-            "this->tree_index_of_first_child".to_string()
-        } else {
-            format!("this->tree_index_of_first_child + {}", local_index)
+/// Returns the NativeClass for a PropertyReference::InNativeItem
+/// (or a InParent of InNativeItem )
+fn native_item<'a>(
+    item_ref: &llr::PropertyReference,
+    ctx: &'a EvaluationContext,
+) -> &'a NativeClass {
+    match item_ref {
+        llr::PropertyReference::InNativeItem { sub_component_path, item_index, prop_name: _ } => {
+            let mut sub_component = ctx.current_sub_component.unwrap();
+            for i in sub_component_path {
+                sub_component = &sub_component.sub_components[*i].ty;
+            }
+            &sub_component.items[*item_index].ty
         }
-    } else {
-        local_index.to_string()
+        llr::PropertyReference::InParent { level, parent_reference } => {
+            let mut ctx = ctx;
+            for _ in 0..level.get() {
+                ctx = ctx.parent.as_ref().unwrap().ctx;
+            }
+            native_item(parent_reference, ctx)
+        }
+        _ => unreachable!(),
     }
 }
 
-fn compile_expression(
-    expr: &crate::expression_tree::Expression,
-    component: &Rc<Component>,
-) -> String {
+fn compile_expression(expr: &llr::Expression, ctx: &EvaluationContext) -> String {
+    use llr::Expression;
     match expr {
         Expression::StringLiteral(s) => {
             format!(r#"sixtyfps::SharedString(u8"{}")"#, escape_string(s.as_str()))
         }
-        Expression::NumberLiteral(n, unit) => {
-            let num = unit.normalize(*n);
-            if num > 1_000_000_000. {
+        Expression::NumberLiteral(num) => {
+            if *num > 1_000_000_000. {
                 // If the numbers are too big, decimal notation will give too many digit
                 format!("{:+e}", num)
             } else {
@@ -1959,126 +1743,46 @@ fn compile_expression(
         }
         Expression::BoolLiteral(b) => b.to_string(),
         Expression::PropertyReference(nr) => {
-            let access =
-                access_named_reference(nr, component, "self");
+            let access = access_member(nr, ctx);
             format!(r#"{}.get()"#, access)
         }
-        Expression::CallbackReference(nr) => format!(
-            "{}.call",
-            access_named_reference(nr, component, "self")
-        ),
-        Expression::BuiltinFunctionReference(funcref, _) => match funcref {
-            BuiltinFunction::GetWindowScaleFactor => {
-                "self->m_window.window_handle().scale_factor".into()
-            }
-            BuiltinFunction::Debug => {
-                "[](auto... args){ (std::cout << ... << args) << std::endl; return nullptr; }"
-                    .into()
-            }
-            BuiltinFunction::Mod => "[](auto a1, auto a2){ return static_cast<int>(a1) % static_cast<int>(a2); }".into(),
-            BuiltinFunction::Round => "std::round".into(),
-            BuiltinFunction::Ceil => "std::ceil".into(),
-            BuiltinFunction::Floor => "std::floor".into(),
-            BuiltinFunction::Sqrt => "std::sqrt".into(),
-            BuiltinFunction::Abs => "std::abs".into(),
-            BuiltinFunction::Sin => format!("[](float a){{ return std::sin(a * {}); }}", std::f32::consts::PI / 180.),
-            BuiltinFunction::Cos => format!("[](float a){{ return std::cos(a * {}); }}", std::f32::consts::PI / 180.),
-            BuiltinFunction::Tan => format!("[](float a){{ return std::tan(a * {}); }}", std::f32::consts::PI / 180.),
-            BuiltinFunction::ASin => format!("[](float a){{ return std::asin(a) / {}; }}", std::f32::consts::PI / 180.),
-            BuiltinFunction::ACos => format!("[](float a){{ return std::acos(a) / {}; }}", std::f32::consts::PI / 180.),
-            BuiltinFunction::ATan => format!("[](float a){{ return std::atan(a) / {}; }}", std::f32::consts::PI / 180.),
-            BuiltinFunction::SetFocusItem => {
-                "self->m_window.window_handle().set_focus_item".into()
-            }
-            BuiltinFunction::ShowPopupWindow => {
-                "self->m_window.window_handle().show_popup".into()
-            }
-
-           /*  std::from_chars is unfortunately not yet implemented in gcc
-            BuiltinFunction::StringIsFloat => {
-                "[](const auto &a){ double v; auto r = std::from_chars(std::begin(a), std::end(a), v); return r.ptr == std::end(a); }"
-                    .into()
-            }
-            BuiltinFunction::StringToFloat => {
-                "[](const auto &a){ double v; auto r = std::from_chars(std::begin(a), std::end(a), v); return r.ptr == std::end(a) ? v : 0; }"
-                    .into()
-            }*/
-            BuiltinFunction::StringIsFloat => {
-                "[](const auto &a){ auto e1 = std::end(a); auto e2 = const_cast<char*>(e1); std::strtod(std::begin(a), &e2); return e1 == e2; }"
-                    .into()
-            }
-            BuiltinFunction::StringToFloat => {
-                "[](const auto &a){ auto e1 = std::end(a); auto e2 = const_cast<char*>(e1); auto r = std::strtod(std::begin(a), &e2); return e1 == e2 ? r : 0; }"
-                    .into()
-            }
-            BuiltinFunction::ImplicitLayoutInfo(_) => {
-                unreachable!()
-            }
-            BuiltinFunction::ColorBrighter => {
-                "[](const auto &color, float factor) { return color.brighter(factor); }".into()
-            }
-            BuiltinFunction::ColorDarker => {
-                "[](const auto &color, float factor) { return color.darker(factor); }".into()
-            }
-            BuiltinFunction::ImageSize => {
-                "[](const sixtyfps::Image &img) { return img.size(); }".into()
-            }
-            BuiltinFunction::ArrayLength => {
-                "[](const auto &model) { (*model).track_row_count_changes(); return (*model).row_count(); }".into()
-            }
-            BuiltinFunction::Rgb => {
-                "[](int r, int g, int b, float a) {{ return sixtyfps::Color::from_argb_uint8(std::clamp(a * 255., 0., 255.), std::clamp(r, 0, 255), std::clamp(g, 0, 255), std::clamp(b, 0, 255)); }}".into()
-            }
-            BuiltinFunction::RegisterCustomFontByPath => {
-                panic!("internal error: RegisterCustomFontByPath can only be evaluated from within a FunctionCall expression")
-            }
-            BuiltinFunction::RegisterCustomFontByMemory => {
-                panic!("internal error: RegisterCustomFontByMemory can only be evaluated from within a FunctionCall expression")
-            }
-        },
-        Expression::ElementReference(_) => todo!("Element references are only supported in the context of built-in function calls at the moment"),
-        Expression::MemberFunction { .. } => panic!("member function expressions must not appear in the code generator anymore"),
-        Expression::BuiltinMacroReference { .. } => panic!("macro expressions must not appear in the code generator anymore"),
-        Expression::RepeaterIndexReference { element } => {
-            let access = access_member(
-                &element.upgrade().unwrap().borrow().base_type.as_component().root_element,
-                "",
-                component,
-                "self",
-            );
-            format!(r#"{}index.get()"#, access)
+        Expression::BuiltinFunctionCall { function, arguments } => {
+            compile_builtin_function_call(*function, &arguments, ctx)
         }
-        Expression::RepeaterModelReference { element } => {
-            let access = access_member(
-                &element.upgrade().unwrap().borrow().base_type.as_component().root_element,
-                "",
-                component,
-                "self",
-            );
-            format!(r#"{}model_data.get()"#, access)
+        Expression::CallBackCall{ callback, arguments } => {
+            let f = access_member(callback, ctx);
+            let mut a = arguments.iter().map(|a| compile_expression(a, ctx));
+            format!("{}.call({})", f, a.join(","))
+        }
+        Expression::ExtraBuiltinFunctionCall { function, arguments, return_ty: _ } => {
+            let mut a = arguments.iter().map(|a| compile_expression(a, ctx));
+            format!("sixtyfps::private_api::{}({})", ident(&function), a.join(","))
         }
         Expression::FunctionParameterReference { index, .. } => format!("arg_{}", index),
         Expression::StoreLocalVariable { name, value } => {
-            format!("auto {} = {};", ident(name), compile_expression(value, component))
+            format!("auto {} = {};", ident(name), compile_expression(value, ctx))
         }
-        Expression::ReadLocalVariable { name, .. } => ident(name).into_owned(),
-        Expression::StructFieldAccess { base, name } => match base.ty() {
+        Expression::ReadLocalVariable { name, .. } => ident(name),
+        Expression::StructFieldAccess { base, name } => match base.ty(ctx) {
             Type::Struct { fields, name : None, .. } => {
                 let index = fields
                     .keys()
                     .position(|k| k == name)
                     .expect("Expression::ObjectAccess: Cannot find a key in an object");
-                format!("std::get<{}>({})", index, compile_expression(base, component))
+                format!("std::get<{}>({})", index, compile_expression(base, ctx))
             }
             Type::Struct{..} => {
-                format!("{}.{}", compile_expression(base, component), ident(name))
+                format!("{}.{}", compile_expression(base, ctx), ident(name))
             }
             _ => panic!("Expression::ObjectAccess's base expression is not an Object type"),
         },
+        Expression::ArrayIndex { array, index } => {
+            format!("[&](const auto &model, const auto &index){{ model->track_row_data_changes(index); return model->row_data(index); }}({}, {})", compile_expression(array, ctx), compile_expression(index, ctx))
+        },
         Expression::Cast { from, to } => {
-            let f = compile_expression(&*from, component);
-            match (from.ty(), to) {
-                (Type::Float32, Type::String) | (Type::Int32, Type::String) => {
+            let f = compile_expression(&*from, ctx);
+            match (from.ty(ctx), to) {
+                (from, Type::String) if from.as_unit_product().is_some() => {
                     format!("sixtyfps::SharedString::from_number({})", f)
                 }
                 (Type::Float32, Type::Model) | (Type::Int32, Type::Model) => {
@@ -2096,13 +1800,70 @@ fn compile_expression(
                 }
                 (Type::Struct { .. }, Type::Struct{ fields, name: Some(_), ..}) => {
                     format!(
-                        "[&](const auto &o){{ {struct_name} s; auto& [{field_members}] = s; {fields}; return s; }}({obj})",
+                        "[&](const auto &o){{ {struct_name} s; {fields} return s; }}({obj})",
                         struct_name = to.cpp_type().unwrap(),
-                        field_members = (0..fields.len()).map(|idx| format!("f_{}", idx)).join(", "),
+                        fields = fields.keys().enumerate().map(|(i, n)| format!("s.{} = std::get<{}>(o); ", ident(n), i)).join(""),
                         obj = f,
-                        fields = (0..fields.len())
-                            .map(|idx| format!("f_{} = std::get<{}>(o)", idx, idx))
-                            .join("; ")
+                    )
+                }
+                (Type::Array(..), Type::PathData)
+                    if matches!(
+                        from.as_ref(),
+                        Expression::Array { element_ty: Type::Struct { .. }, .. }
+                    ) =>
+                {
+                    let path_elements = match from.as_ref() {
+                        Expression::Array { element_ty: _, values, as_model: _ } => values
+                            .iter()
+                            .map(|path_elem_expr| {
+                                let (field_count, qualified_elem_type_name) = match path_elem_expr.ty(ctx) {
+                                    Type::Struct{ fields, name: Some(name), .. } => (fields.len(), name),
+                                    _ => unreachable!()
+                                };
+                                // Turn sixtyfps::private_api::PathLineTo into `LineTo`
+                                let elem_type_name = qualified_elem_type_name.split("::").last().unwrap().strip_prefix("Path").unwrap();
+                                let elem_init = if field_count > 0 {
+                                    compile_expression(path_elem_expr, ctx)
+                                } else {
+                                    String::new()
+                                };
+                                format!("sixtyfps::private_api::PathElement::{}({})", elem_type_name, elem_init)
+                            }),
+                        _ => {
+                            unreachable!()
+                        }
+                    }.collect::<Vec<_>>();
+                    format!(
+                        r#"[&](){{
+                            sixtyfps::private_api::PathElement elements[{}] = {{
+                                {}
+                            }};
+                            return sixtyfps::private_api::PathData(&elements[0], std::size(elements));
+                        }}()"#,
+                        path_elements.len(),
+                        path_elements.join(",")
+                    )
+                }
+                (Type::Struct { .. }, Type::PathData)
+                    if matches!(
+                        from.as_ref(),
+                        Expression::Struct { ty: Type::Struct { .. }, .. }
+                    ) =>
+                {
+                    let (events, points) = match from.as_ref() {
+                        Expression::Struct { ty: _, values } => (
+                            compile_expression(&values["events"], ctx),
+                            compile_expression(&values["points"], ctx),
+                        ),
+                        _ => {
+                            unreachable!()
+                        }
+                    };
+                    format!(
+                        r#"[&](auto events, auto points){{
+                            return sixtyfps::private_api::PathData(events.ptr, events.len, points.ptr, points.len);
+                        }}({}, {})"#,
+                        events, points
                     )
                 }
                 _ => f,
@@ -2112,116 +1873,62 @@ fn compile_expression(
             let len = sub.len();
             let mut x = sub.iter().enumerate().map(|(i, e)| {
                 if i == len - 1 {
-                    return_compile_expression(e, component, None) + ";"
+                    return_compile_expression(e, ctx, None) + ";"
                 }
                 else {
-                    compile_expression(e, component)
+                    compile_expression(e, ctx)
                 }
 
             });
 
             format!("[&]{{ {} }}()", x.join(";"))
         }
-        Expression::FunctionCall { function, arguments, source_location: _  } => match &**function {
-            Expression::BuiltinFunctionReference(BuiltinFunction::SetFocusItem, _) => {
-                if arguments.len() != 1 {
-                    panic!("internal error: incorrect argument count to SetFocusItem call");
-                }
-                if let Expression::ElementReference(focus_item) = &arguments[0] {
-                    let focus_item = focus_item.upgrade().unwrap();
-                    let component_ref = access_element_component(&focus_item, component, "self");
-                    format!("self->m_window.window_handle().set_focus_item({}->self_weak.lock()->into_dyn(), {});", component_ref, absolute_element_item_index_expression(&focus_item))
-                } else {
-                    panic!("internal error: argument to SetFocusItem must be an element")
-                }
+        Expression::PropertyAssignment { property, value} => {
+            let value = compile_expression(value, ctx);
+            property_set_value_code(property, &value, ctx)
+        }
+        Expression::ModelDataAssignment { level, value } => {
+            let value = compile_expression(value, ctx);
+            let mut path = "self".to_string();
+            let mut ctx2 = ctx;
+            let mut repeater_index = None;
+            for _ in 0..=*level {
+                let x = ctx2.parent.clone().unwrap();
+                ctx2 = x.ctx;
+                repeater_index = x.repeater_index;
+                write!(path, "->parent").unwrap();
             }
-            Expression::BuiltinFunctionReference(BuiltinFunction::ShowPopupWindow, _) => {
-                if arguments.len() != 1 {
-                    panic!("internal error: incorrect argument count to SetFocusItem call");
-                }
-                if let Expression::ElementReference(popup_window) = &arguments[0] {
-                    let popup_window = popup_window.upgrade().unwrap();
-                    let pop_comp = popup_window.borrow().enclosing_component.upgrade().unwrap();
-                    let popup_window_rcid = component_id(&pop_comp);
-                    let parent_component = pop_comp.parent_element.upgrade().unwrap().borrow().enclosing_component.upgrade().unwrap();
-                    let popup_list = parent_component.popup_windows.borrow();
-                    let popup = popup_list.iter().find(|p| Rc::ptr_eq(&p.component, &pop_comp)).unwrap();
-                    let x = access_named_reference(&popup.x, component, "self");
-                    let y = access_named_reference(&popup.y, component, "self");
-                    let parent_component_ref = access_element_component(&popup.parent_element, component, "self");
-                    format!(
-                        "self->m_window.window_handle().show_popup<{}>(self, {{ {}.get(), {}.get() }}, {{ {}->self_weak.lock()->into_dyn(), {} }} );",
-                        popup_window_rcid, x, y,
-                        parent_component_ref,
-                        absolute_element_item_index_expression(&popup.parent_element),
-                    )
-                } else {
-                    panic!("internal error: argument to SetFocusItem must be an element")
-                }
+            let repeater_index = repeater_index.unwrap();
+            let mut index_prop = llr::PropertyReference::Local {
+                sub_component_path: vec![],
+                property_index: ctx2.current_sub_component.unwrap().repeated[repeater_index]
+                    .index_prop
+                    .unwrap(),
+            };
+            if let Some(level) = NonZeroUsize::new(*level) {
+                index_prop =
+                    llr::PropertyReference::InParent { level, parent_reference: index_prop.into() };
             }
-            Expression::BuiltinFunctionReference(BuiltinFunction::ImplicitLayoutInfo(orientation), _) => {
-                if arguments.len() != 1 {
-                    panic!("internal error: incorrect argument count to ImplicitLayoutInfo call");
-                }
-                if let Expression::ElementReference(item) = &arguments[0] {
-                    let item = item.upgrade().unwrap();
-                    let item = item.borrow();
-                    if item.sub_component().is_some() {
-                        format!("self->{compo}.layout_info({o}, &m_window.window_handle())",
-                            compo = ident(&item.id),
-                            o = to_cpp_orientation(*orientation)
-                        )
-                    } else {
-                        let native_item = item.base_type.as_native();
-                        format!("{vt}->layout_info({{{vt}, const_cast<sixtyfps::cbindgen_private::{ty}*>(&self->{id})}}, {o}, &m_window.window_handle())",
-                            vt = native_item.cpp_vtable_getter,
-                            ty = native_item.class_name,
-                            id = ident(&item.id),
-                            o = to_cpp_orientation(*orientation),
-                        )
-                    }
-                } else {
-                    panic!("internal error: argument to ImplicitLayoutInfo must be an element")
-                }
-            }
-            Expression::BuiltinFunctionReference(BuiltinFunction::RegisterCustomFontByPath, _) => {
-                if arguments.len() != 1 {
-                    panic!("internal error: incorrect argument count to RegisterCustomFontByPath call");
-                }
-                if let Expression::StringLiteral(font_path) = &arguments[0] {
-                    format!("sixtyfps::private_api::register_font_from_path(\"{}\");", escape_string(font_path))
-                } else {
-                    panic!("internal error: argument to RegisterCustomFontByPath must be a string literal")
-                }
-            }
-            Expression::BuiltinFunctionReference(BuiltinFunction::RegisterCustomFontByMemory, _) => {
-                if arguments.len() != 1 {
-                    panic!("internal error: incorrect argument count to RegisterCustomFontByMemory call");
-                }
-                if let Expression::NumberLiteral(resource_id, _) = &arguments[0] {
-                    let resource_id: usize = *resource_id as _;
-                    let symbol = format!("sfps_embedded_resource_{}", resource_id);
-                    format!("sixtyfps::private_api::register_font_from_data({}, std::size({}));", symbol, symbol)
-                } else {
-                    panic!("internal error: argument to RegisterCustomFontByMemory must be a number")
-                }
-            }
-            _ => {
-                let mut args = arguments.iter().map(|e| compile_expression(e, component));
-
-                format!("{}({})", compile_expression(function, component), args.join(", "))
-            }
-        },
-        Expression::SelfAssignment { lhs, rhs, op } => {
-            let rhs = compile_expression(&*rhs, component);
-            compile_assignment(lhs, *op, rhs, component)
+            let index_access = access_member(&index_prop, ctx);
+            write!(path, "->repeater_{}", repeater_index).unwrap();
+            format!("{}.model_set_row_data({}.get(), {})", path, index_access, value)
+        }
+        Expression::ArrayIndexAssignment { array, index, value } => {
+            debug_assert!(matches!(array.ty(ctx), Type::Array(_)));
+            let base_e = compile_expression(array, ctx);
+            let index_e = compile_expression(index, ctx);
+            let value_e = compile_expression(value, ctx);
+            format!(
+                "{}->set_row_data({}, {})",
+                base_e, index_e, value_e
+            )
         }
         Expression::BinaryExpression { lhs, rhs, op } => {
             let mut buffer = [0; 3];
             format!(
                 "({lhs} {op} {rhs})",
-                lhs = compile_expression(&*lhs, component),
-                rhs = compile_expression(&*rhs, component),
+                lhs = compile_expression(&*lhs, ctx),
+                rhs = compile_expression(&*rhs, ctx),
                 op = match op {
                     '=' => "==",
                     '!' => "!=",
@@ -2235,7 +1942,7 @@ fn compile_expression(
             )
         }
         Expression::UnaryOp { sub, op } => {
-            format!("({op} {sub})", sub = compile_expression(&*sub, component), op = op,)
+            format!("({op} {sub})", sub = compile_expression(&*sub, ctx), op = op,)
         }
         Expression::ImageReference { resource_ref, .. }  => {
             match resource_ref {
@@ -2252,11 +1959,11 @@ fn compile_expression(
             }
         }
         Expression::Condition { condition, true_expr, false_expr } => {
-            let ty = expr.ty();
-            let cond_code = compile_expression(condition, component);
+            let ty = expr.ty(ctx);
+            let cond_code = compile_expression(condition, ctx);
             let cond_code = remove_parentheses(&cond_code);
-            let true_code = return_compile_expression(true_expr, component, Some(&ty));
-            let false_code = return_compile_expression(false_expr, component, Some(&ty));
+            let true_code = return_compile_expression(true_expr, ctx, Some(&ty));
+            let false_code = return_compile_expression(false_expr, ctx, Some(&ty));
             format!(
                 r#"[&]() -> {} {{ if ({}) {{ {}; }} else {{ {}; }}}}()"#,
                 ty.cpp_type().unwrap_or_else(|| "void".to_string()),
@@ -2264,48 +1971,57 @@ fn compile_expression(
                 true_code,
                 false_code
             )
-
         }
-        Expression::Array { element_ty, values } => {
-            let ty = element_ty.cpp_type().unwrap_or_else(|| "FIXME: report error".to_owned());
-            format!(
-                "std::make_shared<sixtyfps::private_api::ArrayModel<{count},{ty}>>({val})",
-                count = values.len(),
-                ty = ty,
-                val = values
-                    .iter()
-                    .map(|e| format!(
-                        "{ty} ( {expr} )",
-                        expr = compile_expression(e, component),
-                        ty = ty,
-                    ))
-                    .join(", ")
-            )
+        Expression::Array { element_ty, values, as_model } => {
+            let ty = element_ty.cpp_type().unwrap();
+            let mut val = values.iter().map(|e| format!("{ty} ( {expr} )", expr = compile_expression(e, ctx), ty = ty));
+            if *as_model {
+                format!(
+                    "std::make_shared<sixtyfps::private_api::ArrayModel<{count},{ty}>>({val})",
+                    count = values.len(),
+                    ty = ty,
+                    val = val.join(", ")
+                )
+            } else {
+                format!(
+                    "sixtyfps::Slice<{ty}>{{ std::array<{ty}, {count}>{{ {val} }}.data(), {count} }}",
+                    count = values.len(),
+                    ty = ty,
+                    val = val.join(", ")
+                )
+            }
         }
         Expression::Struct { ty, values } => {
-            if let Type::Struct{fields, ..} = ty {
+            if let Type::Struct{fields, name: None, ..} = ty {
                 let mut elem = fields.keys().map(|k| {
                     values
                         .get(k)
-                        .map(|e| compile_expression(e, component))
+                        .map(|e| compile_expression(e, ctx))
                         .unwrap_or_else(|| "(Error: missing member in object)".to_owned())
                 });
-                format!("{}{{{}}}", ty.cpp_type().unwrap(), elem.join(", "))
+                format!("std::make_tuple({})", elem.join(", "))
+            } else if let Type::Struct{ name: Some(_), .. } = ty {
+                format!(
+                    "[&]({args}){{ {ty} o{{}}; {fields}return o; }}({vals})",
+                    args = (0..values.len()).map(|i| format!("const auto &a_{}", i)).join(", "),
+                    ty = ty.cpp_type().unwrap(),
+                    fields = values.keys().enumerate().map(|(i, f)| format!("o.{} = a_{}; ", ident(f), i)).join(""),
+                    vals = values.values().map(|e| compile_expression(e, ctx)).join(", "),
+                )
             } else {
                 panic!("Expression::Object is not a Type::Object")
             }
         }
-        Expression::PathElements { elements } => compile_path(elements, component),
         Expression::EasingCurve(EasingCurve::Linear) => "sixtyfps::cbindgen_private::EasingCurve()".into(),
         Expression::EasingCurve(EasingCurve::CubicBezier(a, b, c, d)) => format!(
             "sixtyfps::cbindgen_private::EasingCurve(sixtyfps::cbindgen_private::EasingCurve::Tag::CubicBezier, {}, {}, {}, {})",
             a, b, c, d
         ),
         Expression::LinearGradient{angle, stops} => {
-            let angle = compile_expression(angle, component);
+            let angle = compile_expression(angle, ctx);
             let mut stops_it = stops.iter().map(|(color, stop)| {
-                let color = compile_expression(color, component);
-                let position = compile_expression(stop, component);
+                let color = compile_expression(color, ctx);
+                let position = compile_expression(stop, ctx);
                 format!("sixtyfps::private_api::GradientStop{{ {}, {}, }}", color, position)
             });
             format!(
@@ -2318,551 +2034,296 @@ fn compile_expression(
         }
         Expression::ReturnStatement(Some(expr)) => format!(
             "throw sixtyfps::private_api::ReturnWrapper<{}>({})",
-            expr.ty().cpp_type().unwrap_or_default(),
-            compile_expression(expr, component)
+            expr.ty(ctx).cpp_type().unwrap_or_default(),
+            compile_expression(expr, ctx)
         ),
         Expression::ReturnStatement(None) => "throw sixtyfps::private_api::ReturnWrapper<void>()".to_owned(),
-        Expression::LayoutCacheAccess { layout_cache_prop, index, repeater_index } => {
-            let cache = access_named_reference(layout_cache_prop, component, "self");
+        Expression::LayoutCacheAccess { layout_cache_prop, index, repeater_index } =>  {
+            let cache = access_member(layout_cache_prop, ctx);
             if let Some(ri) = repeater_index {
-                format!("sixtyfps::private_api::layout_cache_access({}.get(), {}, {})", cache, index, compile_expression(ri, component))
+                format!("sixtyfps::private_api::layout_cache_access({}.get(), {}, {})", cache, index, compile_expression(ri, ctx))
             } else {
                 format!("{}.get()[{}]", cache, index)
             }
         }
-        Expression::ComputeLayoutInfo(Layout::GridLayout(layout), o) => {
-            let (padding, spacing) = generate_layout_padding_and_spacing(&layout.geometry, *o, component);
-            let cells = grid_layout_cell_data(layout, *o, component);
-            format!("[&] {{ \
-                    const auto padding = {};\
-                    sixtyfps::GridLayoutCellData cells[] = {{ {} }}; \
-                    const sixtyfps::Slice<sixtyfps::GridLayoutCellData> slice{{ cells, std::size(cells)}}; \
-                    return sixtyfps::sixtyfps_grid_layout_info(slice, {}, &padding);\
-                }}()",
-                padding, cells, spacing
-            )
-        }
-        Expression::ComputeLayoutInfo(Layout::BoxLayout(layout), o) => {
-            let (padding, spacing) = generate_layout_padding_and_spacing(&layout.geometry, *o, component);
-            let (cells, alignment) = box_layout_data(layout, *o, component, None);
-            let call = if *o == layout.orientation {
-                format!("sixtyfps_box_layout_info(slice, {}, &padding, {})", spacing, alignment)
-            } else {
-                "sixtyfps_box_layout_info_ortho(slice, &padding)".to_string()
-            };
-            format!("[&] {{ \
-                    const auto padding = {};\
-                    {}\
-                    const sixtyfps::Slice<sixtyfps::BoxLayoutCellData> slice{{ std::data(cells), std::size(cells)}}; \
-                    return sixtyfps::cbindgen_private::{};\
-                }}()",
-                padding, cells, call
-            )
-        }
-        Expression::ComputeLayoutInfo(Layout::PathLayout(_), _) => unimplemented!(),
-        Expression::SolveLayout(Layout::GridLayout(layout), o) => {
-            let (padding, spacing) = generate_layout_padding_and_spacing(&layout.geometry, *o, component);
-            let cells = grid_layout_cell_data(layout, *o, component);
-            let size = layout_geometry_size(&layout.geometry.rect, *o, component);
-            let dialog = if let (Some(button_roles), Orientation::Horizontal) = (&layout.dialog_button_roles, *o) {
-                format!("sixtyfps::cbindgen_private::DialogButtonRole roles[] = {{ {r} }};\
-                        sixtyfps::cbindgen_private::sixtyfps_reorder_dialog_button_layout(cells,\
-                            sixtyfps::Slice<sixtyfps::cbindgen_private::DialogButtonRole>{{ roles, std::size(roles) }});\
-                        ",
-                    r = button_roles.iter().map(|r| format!("sixtyfps::cbindgen_private::DialogButtonRole::{}", r)).join(", ")
-                )
-            } else { String::new() };
-            format!("[&] {{\
-                    const auto padding = {p};\
-                    sixtyfps::GridLayoutCellData cells[] = {{ {c} }};\
-                    {dialog}
-                    const sixtyfps::Slice<sixtyfps::GridLayoutCellData> slice{{ cells, std::size(cells)}};\
-                    const sixtyfps::GridLayoutData grid {{ {sz},  {s}, &padding, slice }};\
-                    sixtyfps::SharedVector<float> result;\
-                    sixtyfps::sixtyfps_solve_grid_layout(&grid, &result);\
-                    return result;\
-                }}()",
-                dialog = dialog, p = padding, c = cells, s = spacing, sz = size
-            )
-        }
-        Expression::SolveLayout(Layout::BoxLayout(layout), o) => {
-            let (padding, spacing) = generate_layout_padding_and_spacing(&layout.geometry, *o, component);
-            let mut repeated_indices = Default::default();
-            let mut repeated_indices_init = Default::default();
-            let (cells, alignment) = box_layout_data(layout, *o, component, Some((&mut repeated_indices, &mut repeated_indices_init)));
-            let size = layout_geometry_size(&layout.geometry.rect, *o, component);
-            format!("[&] {{ \
-                    {ri_init}\
-                    const auto padding = {p};\
-                    {c}\
-                    const sixtyfps::Slice<sixtyfps::BoxLayoutCellData> slice{{ std::data(cells), std::size(cells)}}; \
-                    sixtyfps::BoxLayoutData box {{ {sz}, {s}, &padding, {a}, slice }};
-                    sixtyfps::SharedVector<float> result;
-                    sixtyfps::sixtyfps_solve_box_layout(&box, {ri}, &result);\
-                    return result;
-                }}()",
-                ri_init = repeated_indices_init, ri = repeated_indices,
-                p = padding, c = cells, s = spacing, sz = size, a = alignment,
-            )
-        }
-        Expression::SolveLayout(Layout::PathLayout(layout), _) => {
-            let width = layout_geometry_size(&layout.rect, Orientation::Horizontal, component);
-            let height = layout_geometry_size(&layout.rect, Orientation::Vertical, component);
-            let elements = compile_path(&layout.path, component);
-            let prop = |expr: &Option<NamedReference>| {
-                if let Some(nr) = expr.as_ref() {
-                    format!("{}.get()", access_named_reference(nr, component, "self"))
-                } else {
-                    "0.".into()
+        Expression::BoxLayoutFunction {
+            cells_variable,
+            repeater_indices,
+            elements,
+            orientation,
+            sub_expression,
+        } => box_layout_function(
+            cells_variable,
+            repeater_indices.as_ref().map(String::as_str),
+            elements,
+            *orientation,
+            sub_expression,
+            ctx,
+        ),
+        Expression::ComputeDialogLayoutCells { cells_variable, roles, unsorted_cells } => {
+            let cells_variable = ident(&cells_variable);
+            let mut cells = match &**unsorted_cells {
+                Expression::Array { values, .. } => {
+                    values.iter().map(|v| compile_expression(v, ctx))
                 }
+                _ => panic!("dialog layout unsorted cells not an array"),
             };
-            // FIXME! repeater
-            format!("[&] {{ \
-                    const auto elements = {e};\
-                    sixtyfps::PathLayoutData path {{ &elements, {c}, 0, 0, {w}, {h}, {o} }};
-                    sixtyfps::SharedVector<float> result;
-                    sixtyfps::sixtyfps_solve_path_layout(&path, {{}}, &result);\
-                    return result;
-                }}()",
-                e = elements, c = layout.elements.len(), w = width, h = height, o = prop(&layout.offset_reference)
-            )
+            format!("sixtyfps::cbindgen_private::GridLayoutCellData {cv}_array [] = {{ {c} }};\
+                    sixtyfps::cbindgen_private::sixtyfps_reorder_dialog_button_layout({cv}_array, {r});\
+                    sixtyfps::Slice<sixtyfps::cbindgen_private::GridLayoutCellData> {cv} {{ std::data({cv}_array), std::size({cv}_array) }}",
+                    r = compile_expression(roles, ctx),
+                    cv = cells_variable,
+                    c = cells.join(", "),
+                )
 
         }
-        Expression::Uncompiled(_) => panic!(),
-        Expression::Invalid => "\n#error invalid expression\n".to_string(),
     }
 }
 
-fn compile_assignment(
-    lhs: &Expression,
-    op: char,
-    rhs: String,
-    component: &Rc<Component>,
+fn compile_builtin_function_call(
+    function: BuiltinFunction,
+    arguments: &[llr::Expression],
+    ctx: &EvaluationContext,
 ) -> String {
-    match lhs {
-        Expression::PropertyReference(nr) => {
-            let access = access_named_reference(nr, component, "self");
-            let set = property_set_value_code(
-                component,
-                &nr.element(),
-                nr.name(),
-                &(if op == '=' { rhs } else { format!("{}.get() {} {}", access, op, rhs) }),
-            );
-            format!("{}.{}", access, set)
+    let mut a = arguments.iter().map(|a| compile_expression(a, ctx));
+    let pi_180 = std::f64::consts::PI / 180.0;
+
+    match function {
+        BuiltinFunction::GetWindowScaleFactor => {
+            let window = access_window_field(ctx);
+            format!("{}.scale_factor()", window)
         }
-        Expression::StructFieldAccess { base, name } => {
-            let tmpobj = "tmpobj";
-            let get_obj = compile_expression(base, component);
-            let ty = base.ty();
-            let member = match &ty {
-                Type::Struct { fields, name: None, .. } => {
-                    let index = fields
-                        .keys()
-                        .position(|k| k == name)
-                        .expect("Expression::ObjectAccess: Cannot find a key in an object");
-                    format!("std::get<{}>({})", index, tmpobj)
-                }
-                Type::Struct { .. } => format!("{}.{}", tmpobj, ident(name)),
-                _ => panic!("Expression::ObjectAccess's base expression is not an Object type"),
-            };
-            let op = if op == '=' { ' ' } else { op };
-            let new_value = format!(
-                "[&]{{ auto {tmp} = {get}; {member} {op}= {rhs}; return {tmp}; }}()",
-                tmp = tmpobj,
-                get = get_obj,
-                member = member,
-                op = op,
-                rhs = rhs,
-            );
-            compile_assignment(base, '=', new_value, component)
+        BuiltinFunction::Debug => {
+            format!("std::cout << {} << std::endl;", a.join("<<"))
         }
-        Expression::RepeaterModelReference { element } => {
-            let element = element.upgrade().unwrap();
-            let parent_component = element.borrow().base_type.as_component().clone();
-            let repeater_access = access_member(
-                &parent_component
-                    .parent_element
-                    .upgrade()
-                    .unwrap()
-                    .borrow()
-                    .enclosing_component
-                    .upgrade()
-                    .unwrap()
-                    .root_element,
-                "",
-                component,
-                "self",
-            );
-            let index_access = access_member(&parent_component.root_element, "", component, "self");
-            let repeater_id = format!("repeater_{}", ident(&element.borrow().id));
-            if op == '=' {
+        BuiltinFunction::Mod => format!(
+            "static_cast<int>({}) % static_cast<int>({})",
+            a.next().unwrap(),
+            a.next().unwrap()
+        ),
+        BuiltinFunction::Round => format!("std::round({})", a.next().unwrap()),
+        BuiltinFunction::Ceil => format!("std::ceil({})", a.next().unwrap()),
+        BuiltinFunction::Floor => format!("std::floor({})", a.next().unwrap()),
+        BuiltinFunction::Sqrt => format!("std::sqrt({})", a.next().unwrap()),
+        BuiltinFunction::Abs => format!("std::abs({})", a.next().unwrap()),
+        BuiltinFunction::Log => {
+            format!("std::log({}) / std::log({})", a.next().unwrap(), a.next().unwrap())
+        }
+        BuiltinFunction::Pow => {
+            format!("std::pow(({}), ({}))", a.next().unwrap(), a.next().unwrap())
+        }
+        BuiltinFunction::Sin => format!("std::sin(({}) * {})", a.next().unwrap(), pi_180),
+        BuiltinFunction::Cos => format!("std::cos(({}) * {})", a.next().unwrap(), pi_180),
+        BuiltinFunction::Tan => format!("std::tan(({}) * {})", a.next().unwrap(), pi_180),
+        BuiltinFunction::ASin => format!("std::asin({}) / {}", a.next().unwrap(), pi_180),
+        BuiltinFunction::ACos => format!("std::acos({}) / {}", a.next().unwrap(), pi_180),
+        BuiltinFunction::ATan => format!("std::atan({}) / {}", a.next().unwrap(), pi_180),
+        BuiltinFunction::SetFocusItem => {
+            if let [llr::Expression::PropertyReference(pr)] = arguments {
+                let window = access_window_field(ctx);
+                let focus_item = access_item_rc(pr, ctx);
+                format!("{}.set_focus_item({});", window, focus_item)
+            } else {
+                panic!("internal error: invalid args to SetFocusItem {:?}", arguments)
+            }
+        }
+        /*  std::from_chars is unfortunately not yet implemented in gcc
+        BuiltinFunction::StringIsFloat => {
+            "[](const auto &a){ double v; auto r = std::from_chars(std::begin(a), std::end(a), v); return r.ptr == std::end(a); }"
+                .into()
+        }
+        BuiltinFunction::StringToFloat => {
+            "[](const auto &a){ double v; auto r = std::from_chars(std::begin(a), std::end(a), v); return r.ptr == std::end(a) ? v : 0; }"
+                .into()
+        }*/
+        BuiltinFunction::StringIsFloat => {
+            format!("[](const auto &a){{ auto e1 = std::end(a); auto e2 = const_cast<char*>(e1); std::strtod(std::begin(a), &e2); return e1 == e2; }}({})", a.next().unwrap())
+        }
+        BuiltinFunction::StringToFloat => {
+            format!("[](const auto &a){{ auto e1 = std::end(a); auto e2 = const_cast<char*>(e1); auto r = std::strtod(std::begin(a), &e2); return e1 == e2 ? r : 0; }}({})", a.next().unwrap())
+        }
+        BuiltinFunction::ColorBrighter => {
+            format!("{}.brighter({})", a.next().unwrap(), a.next().unwrap())
+        }
+        BuiltinFunction::ColorDarker => {
+            format!("{}.darker({})", a.next().unwrap(), a.next().unwrap())
+        }
+        BuiltinFunction::ImageSize => {
+            format!("{}.size()", a.next().unwrap())
+        }
+        BuiltinFunction::ArrayLength => {
+            format!("[](const auto &model){{ (*model).track_row_count_changes(); return (*model).row_count(); }}({})", a.next().unwrap())
+        }
+        BuiltinFunction::Rgb => {
+            format!("sixtyfps::Color::from_argb_uint8(std::clamp(static_cast<float>({a}) * 255., 0., 255.), std::clamp(static_cast<int>({r}), 0, 255), std::clamp(static_cast<int>({g}), 0, 255), std::clamp(static_cast<int>({b}), 0, 255))",
+                r = a.next().unwrap(),
+                g = a.next().unwrap(),
+                b = a.next().unwrap(),
+                a = a.next().unwrap(),
+            )
+        }
+        BuiltinFunction::ShowPopupWindow => {
+            if let [llr::Expression::NumberLiteral(popup_index), x, y, llr::Expression::PropertyReference(parent_ref)] =
+                arguments
+            {
+                let window = access_window_field(ctx);
+                let current_sub_component = ctx.current_sub_component.unwrap();
+                let popup_window_id =
+                    ident(&current_sub_component.popup_windows[*popup_index as usize].root.name);
+                let parent_component = access_item_rc(parent_ref, ctx);
+                let x = compile_expression(x, ctx);
+                let y = compile_expression(y, ctx);
                 format!(
-                    "{}{}.model_set_row_data({}index.get(), {})",
-                    repeater_access, repeater_id, index_access, rhs
+                    "{}.show_popup<{}>(self, {{ {}, {} }}, {{ {} }})",
+                    window, popup_window_id, x, y, parent_component,
                 )
             } else {
+                panic!("internal error: invalid args to ShowPopupWindow {:?}", arguments)
+            }
+        }
+        BuiltinFunction::RegisterCustomFontByPath => {
+            if let [llr::Expression::StringLiteral(path)] = arguments {
                 format!(
-                    "{}{}.model_set_row_data({}index.get(), {} {} {})",
-                    repeater_access,
-                    repeater_id,
-                    index_access,
-                    rhs,
-                    op,
-                    compile_expression(lhs, component)
+                    "sixtyfps::private_api::register_font_from_path(\"{}\");",
+                    escape_string(path)
+                )
+            } else {
+                panic!(
+                    "internal error: argument to RegisterCustomFontByPath must be a string literal"
                 )
             }
         }
-        _ => panic!("typechecking should make sure this was a PropertyReference"),
+        BuiltinFunction::RegisterCustomFontByMemory => {
+            if let [llr::Expression::NumberLiteral(resource_id)] = &arguments {
+                let resource_id: usize = *resource_id as _;
+                let symbol = format!("sfps_embedded_resource_{}", resource_id);
+                format!(
+                    "sixtyfps::private_api::register_font_from_data({}, std::size({}));",
+                    symbol, symbol
+                )
+            } else {
+                panic!("internal error: invalid args to RegisterCustomFontByMemory {:?}", arguments)
+            }
+        }
+        BuiltinFunction::ImplicitLayoutInfo(orient) => {
+            if let [llr::Expression::PropertyReference(pr)] = arguments {
+                let native = native_item(pr, ctx);
+                format!(
+                    "{vt}->layout_info({{{vt}, const_cast<sixtyfps::cbindgen_private::{ty}*>(&{i})}}, {o}, &{window})",
+                    vt = native.cpp_vtable_getter,
+                    ty = native.class_name,
+                    o = to_cpp_orientation(orient),
+                    i = access_member(pr, ctx),
+                    window = access_window_field(ctx)
+                )
+            } else {
+                panic!("internal error: invalid args to ImplicitLayoutInfo {:?}", arguments)
+            }
+        }
     }
 }
 
-fn grid_layout_cell_data(
-    layout: &crate::layout::GridLayout,
+fn box_layout_function(
+    cells_variable: &str,
+    repeated_indices: Option<&str>,
+    elements: &[Either<llr::Expression, usize>],
     orientation: Orientation,
-    component: &Rc<Component>,
+    sub_expression: &llr::Expression,
+    ctx: &llr_EvaluationContext<String>,
 ) -> String {
-    layout
-        .elems
-        .iter()
-        .map(|c| {
-            let (col_or_row, span) = c.col_or_row_and_span(orientation);
-            format!(
-                "sixtyfps::GridLayoutCellData {{ {}, {}, {} }}",
-                col_or_row,
-                span,
-                get_layout_info(&c.item.element, component, &c.item.constraints, orientation, None),
-            )
-        })
-        .join(", ")
-}
+    let repeated_indices = repeated_indices.map(ident);
+    let mut push_code =
+        "std::vector<sixtyfps::cbindgen_private::BoxLayoutCellData> cells_vector;".to_owned();
+    let mut repeater_idx = 0usize;
 
-/// Returns `(cells, alignment)`.
-/// The repeated_indices initialize the repeated_indices (var, init_code)
-fn box_layout_data(
-    layout: &crate::layout::BoxLayout,
-    orientation: Orientation,
-    component: &Rc<Component>,
-    mut repeated_indices: Option<(&mut String, &mut String)>,
-) -> (String, String) {
-    let alignment = if let Some(nr) = &layout.geometry.alignment {
-        format!("{}.get()", access_named_reference(nr, component, "self"))
-    } else {
-        "{}".into()
-    };
+    for item in elements {
+        match item {
+            Either::Left(value) => {
+                push_code +=
+                    &format!("cells_vector.push_back({{ {} }});", compile_expression(value, ctx));
+            }
+            Either::Right(repeater) => {
+                push_code += &format!("self->repeater_{}.ensure_updated(self);", repeater);
 
-    let repeater_count =
-        layout.elems.iter().filter(|i| i.element.borrow().repeated.is_some()).count();
-
-    if repeater_count == 0 {
-        let mut cells = layout.elems.iter().map(|li| {
-            format!(
-                "sixtyfps::BoxLayoutCellData{{ {} }}",
-                get_layout_info(&li.element, component, &li.constraints, orientation, None)
-            )
-        });
-        if let Some((ri, _)) = &mut repeated_indices {
-            **ri = "{}".into();
-        }
-        (format!("sixtyfps::BoxLayoutCellData cells[] = {{ {} }};", cells.join(", ")), alignment)
-    } else {
-        let mut push_code = "std::vector<sixtyfps::BoxLayoutCellData> cells;".to_owned();
-        if let Some((ri, init)) = &mut repeated_indices {
-            **ri =
-                "sixtyfps::Slice<unsigned int>{std::data(repeater_indices), std::size(repeater_indices)}"
-                    .to_owned();
-            **init = format!("std::array<unsigned int, {}> repeater_indices;", repeater_count * 2);
-        }
-        let mut repeater_idx = 0usize;
-        for item in &layout.elems {
-            if item.element.borrow().repeated.is_some() {
-                push_code += &format!(
-                    "self->repeater_{}.ensure_updated(self);",
-                    ident(&item.element.borrow().id)
-                );
-                if repeated_indices.is_some() {
-                    push_code += &format!("repeater_indices[{}] = cells.size();", repeater_idx * 2);
+                if let Some(ri) = &repeated_indices {
+                    push_code +=
+                        &format!("{}_array[{}] = cells_vector.size();", ri, repeater_idx * 2);
                     push_code += &format!(
-                        "repeater_indices[{c}] = self->repeater_{id}.inner ? self->repeater_{id}.inner->data.size() : 0;",
+                        "{ri}_array[{c}] = self->repeater_{id}.inner ? self->repeater_{id}.inner->data.size() : 0;",
+                        ri = ri,
                         c = repeater_idx * 2 + 1,
-                        id = ident(&item.element.borrow().id)
+                        id = repeater,
                     );
                 }
                 repeater_idx += 1;
                 push_code += &format!(
                     "if (self->repeater_{id}.inner) \
                         for (auto &&sub_comp : self->repeater_{id}.inner->data) \
-                           cells.push_back((*sub_comp.ptr)->box_layout_data({o}));",
-                    id = ident(&item.element.borrow().id),
+                           cells_vector.push_back((*sub_comp.ptr)->box_layout_data({o}));",
+                    id = repeater,
                     o = to_cpp_orientation(orientation),
-                );
-            } else {
-                push_code += &format!(
-                    "cells.push_back({{ {} }});",
-                    get_layout_info(&item.element, component, &item.constraints, orientation, None)
                 );
             }
         }
-        (push_code, alignment)
     }
-}
 
-fn generate_layout_padding_and_spacing(
-    layout_geometry: &LayoutGeometry,
-    orientation: Orientation,
-    component: &Rc<Component>,
-) -> (String, String) {
-    let prop = |expr: Option<&NamedReference>| {
-        if let Some(nr) = expr {
-            format!("{}.get()", access_named_reference(nr, component, "self"))
-        } else {
-            "0.".into()
-        }
-    };
-    let spacing = prop(layout_geometry.spacing.as_ref());
-    let (begin, end) = layout_geometry.padding.begin_end(orientation);
-    let padding = format!("sixtyfps::Padding {{ {}, {} }};", prop(begin), prop(end));
-    (padding, spacing)
-}
-
-fn layout_geometry_size(
-    rect: &LayoutRect,
-    orientation: Orientation,
-    component: &Rc<Component>,
-) -> String {
-    rect.size_reference(orientation).map_or_else(
-        || "0.".into(),
-        |nr| format!("{}.get()", access_named_reference(nr, component, "self")),
+    let ri = repeated_indices.as_ref().map_or(String::new(), |ri| {
+        push_code += &format!(
+            "sixtyfps::Slice<int> {ri}{{ {ri}_array.data(), {ri}_array.size() }};",
+            ri = ri
+        );
+        format!("std::array<int, {}> {}_array;", 2 * repeater_idx, ri)
+    });
+    format!(
+        "[&]{{ {} {} sixtyfps::Slice<sixtyfps::cbindgen_private::BoxLayoutCellData>{}{{cells_vector.data(), cells_vector.size()}}; return {}; }}()",
+        ri,
+        push_code,
+        ident(cells_variable),
+        compile_expression(sub_expression, ctx)
     )
 }
 
-fn get_layout_info(
-    elem: &ElementRc,
-    component: &Rc<Component>,
-    constraints: &crate::layout::LayoutConstraints,
-    orientation: Orientation,
-    custom_window_handle_accessor: Option<&'_ str>,
-) -> String {
-    let window_handle = if let Some(custom_accessor) = custom_window_handle_accessor {
-        custom_accessor
-    } else {
-        "&self->m_window.window_handle()"
-    };
-    let mut layout_info = if let Some(layout_info_prop) =
-        &elem.borrow().layout_info_prop(orientation)
-    {
-        format!("{}.get()", access_named_reference(layout_info_prop, component, "self"))
-    } else if elem.borrow().sub_component().is_some() {
-        format!(
-            "self->{id}.layout_info({o}, {window_handle})",
-            id = ident(&elem.borrow().id),
-            o = to_cpp_orientation(orientation),
-            window_handle = window_handle
-        )
-    } else {
-        format!(
-            "{vt}->layout_info({{{vt}, const_cast<sixtyfps::cbindgen_private::{ty}*>(&self->{id})}}, {o}, {window_handle})",
-            vt = elem.borrow().base_type.as_native().cpp_vtable_getter,
-            ty = elem.borrow().base_type.as_native().class_name,
-            id = ident(&elem.borrow().id),
-            o = to_cpp_orientation(orientation),
-            window_handle = window_handle
-        )
-    };
-
-    if constraints.has_explicit_restrictions() {
-        layout_info = format!("[&]{{ auto layout_info = {};", layout_info);
-        for (expr, name) in constraints.for_each_restrictions(orientation) {
-            layout_info += &format!(
-                " layout_info.{} = {}.get();",
-                name,
-                access_named_reference(expr, component, "self")
-            );
-        }
-        layout_info += " return layout_info; }()";
-    }
-    layout_info
-}
-
-fn layout_info_function_body(
-    component: &Rc<Component>,
-    self_accessor: String,
-    custom_window_accessor: Option<&'_ str>,
-) -> Vec<String> {
-    vec![
-        self_accessor,
-        format!(
-            "if (o == sixtyfps::Orientation::Horizontal) return {};",
-            get_layout_info(
-                &component.root_element,
-                component,
-                &component.root_constraints.borrow(),
-                Orientation::Horizontal,
-                custom_window_accessor
-            )
-        ),
-        format!(
-            "else return {};",
-            get_layout_info(
-                &component.root_element,
-                component,
-                &component.root_constraints.borrow(),
-                Orientation::Vertical,
-                custom_window_accessor
-            )
-        ),
-    ]
-}
-
-fn compile_path(path: &crate::expression_tree::Path, component: &Rc<Component>) -> String {
-    match path {
-        crate::expression_tree::Path::Elements(elements) => {
-            let converted_elements: Vec<String> = elements
-                .iter()
-                .map(|element| {
-                    let element_initializer = element
-                        .element_type
-                        .native_class
-                        .cpp_type
-                        .as_ref()
-                        .map(|cpp_type| {
-                            new_struct_with_bindings(cpp_type, &element.bindings, component)
-                        })
-                        .unwrap_or_default();
-                    format!(
-                        "sixtyfps::private_api::PathElement::{}({})",
-                        element.element_type.native_class.class_name, element_initializer
-                    )
-                })
-                .collect();
-            format!(
-                r#"[&](){{
-                sixtyfps::private_api::PathElement elements[{}] = {{
-                    {}
-                }};
-                return sixtyfps::private_api::PathData(&elements[0], std::size(elements));
-            }}()"#,
-                converted_elements.len(),
-                converted_elements.join(",")
-            )
-        }
-        crate::expression_tree::Path::Events(events) => {
-            let (converted_events, converted_coordinates) = compile_path_events(events);
-            format!(
-                r#"[&](){{
-                sixtyfps::private_api::PathEvent events[{}] = {{
-                    {}
-                }};
-                sixtyfps::private_api::Point coordinates[{}] = {{
-                    {}
-                }};
-                return sixtyfps::private_api::PathData(&events[0], std::size(events), &coordinates[0], std::size(coordinates));
-            }}()"#,
-                converted_events.len(),
-                converted_events.join(","),
-                converted_coordinates.len(),
-                converted_coordinates.join(",")
-            )
-        }
-    }
-}
-
-fn compile_path_events(events: &[crate::expression_tree::PathEvent]) -> (Vec<String>, Vec<String>) {
-    use lyon_path::Event;
-
-    let mut coordinates = Vec::new();
-
-    let events = events
-        .iter()
-        .map(|event| match event {
-            Event::Begin { at } => {
-                coordinates.push(at);
-                "sixtyfps::private_api::PathEvent::Begin"
-            }
-            Event::Line { from, to } => {
-                coordinates.push(from);
-                coordinates.push(to);
-                "sixtyfps::private_api::PathEvent::Line"
-            }
-            Event::Quadratic { from, ctrl, to } => {
-                coordinates.push(from);
-                coordinates.push(ctrl);
-                coordinates.push(to);
-                "sixtyfps::private_api::PathEvent::Quadratic"
-            }
-            Event::Cubic { from, ctrl1, ctrl2, to } => {
-                coordinates.push(from);
-                coordinates.push(ctrl1);
-                coordinates.push(ctrl2);
-                coordinates.push(to);
-                "sixtyfps::private_api::PathEvent::Cubic"
-            }
-            Event::End { close, .. } => {
-                if *close {
-                    "sixtyfps::private_api::PathEvent::EndClosed"
-                } else {
-                    "sixtyfps::private_api::PathEvent::EndOpen"
-                }
-            }
-        })
-        .map(String::from)
-        .collect();
-
-    let coordinates = coordinates
-        .into_iter()
-        .map(|pt| format!("sixtyfps::private_api::Point{{{}, {}}}", pt.x, pt.y))
-        .collect();
-
-    (events, coordinates)
-}
-
 /// Like compile_expression, but wrap inside a try{}catch{} block to intercept the return
-fn compile_expression_wrap_return(expr: &Expression, component: &Rc<Component>) -> String {
-    /// Return a type if there is any `return` in sub expressions
-    fn return_type(expr: &Expression) -> Option<Type> {
-        if let Expression::ReturnStatement(val) = expr {
-            return Some(val.as_ref().map_or(Type::Void, |v| v.ty()));
+fn compile_expression_wrap_return(expr: &llr::Expression, ctx: &EvaluationContext) -> String {
+    let mut return_type = None;
+    expr.visit_recursive(&mut |e| {
+        if let llr::Expression::ReturnStatement(val) = e {
+            return_type = Some(val.as_ref().map_or(Type::Void, |v| v.ty(ctx)));
         }
-        let mut ret = None;
-        expr.visit(|e| {
-            if ret.is_none() {
-                ret = return_type(e)
-            }
-        });
-        ret
-    }
+    });
 
-    if let Some(ty) = return_type(expr) {
+    if let Some(ty) = return_type {
         if ty == Type::Void || ty == Type::Invalid {
             format!(
                 "[&]{{ try {{ {}; }} catch(const sixtyfps::private_api::ReturnWrapper<void> &w) {{ }} }}()",
-                compile_expression(expr, component)
+                compile_expression(expr, ctx)
             )
         } else {
             let cpp_ty = ty.cpp_type().unwrap_or_default();
             format!(
                 "[&]() -> {} {{ try {{ {}; }} catch(const sixtyfps::private_api::ReturnWrapper<{}> &w) {{ return w.value; }} }}()",
                 cpp_ty,
-                return_compile_expression(expr, component, Some(&ty)),
+                return_compile_expression(expr, ctx, Some(&ty)),
                 cpp_ty
             )
         }
     } else {
-        compile_expression(expr, component)
+        compile_expression(expr, ctx)
     }
 }
 
 /// Like compile expression, but prepended with `return` if not void.
 /// ret_type is the expecting type that should be returned with that return statement
 fn return_compile_expression(
-    expr: &Expression,
-    component: &Rc<Component>,
+    expr: &llr::Expression,
+    ctx: &EvaluationContext,
     ret_type: Option<&Type>,
 ) -> String {
-    let e = compile_expression(expr, component);
+    let e = compile_expression(expr, ctx);
     if ret_type == Some(&Type::Void) || ret_type == Some(&Type::Invalid) {
         e
     } else {
-        let ty = expr.ty();
+        let ty = expr.ty(ctx);
         if ty == Type::Invalid && ret_type.is_some() {
             // e is unreachable so it probably throws. But we still need to return something to avoid a warning
             format!("{}; return {{}}", e)

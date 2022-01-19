@@ -1,3 +1,6 @@
+# Copyright © 2021 SixtyFPS GmbH <info@sixtyfps.io>
+# SPDX-License-Identifier: (GPL-3.0-only OR LicenseRef-SixtyFPS-commercial)
+
 # Configuration file for the Sphinx documentation builder.
 #
 # This file only contains a selection of the most common options. For a full
@@ -56,8 +59,8 @@ exhale_args = {
     "doxygenStripFromPath": "..",
     "createTreeView": True,
     "exhaleExecutesDoxygen": True,
-    "exhaleDoxygenStdin": """INPUT = ../../api/sixtyfps-cpp/include
-EXCLUDE_SYMBOLS = sixtyfps::cbindgen_private* sixtyfps::private_api* vtable*
+    "exhaleDoxygenStdin": """INPUT = ../../api/sixtyfps-cpp/include generated_include
+EXCLUDE_SYMBOLS = sixtyfps::cbindgen_private* sixtyfps::private_api* vtable* SIXTYFPS_DECL_ITEM
 EXCLUDE = ../../api/sixtyfps-cpp/include/vtable.h ../../api/sixtyfps-cpp/include/sixtyfps_testing.h
 ENABLE_PREPROCESSING = YES
 PREDEFINED += DOXYGEN

@@ -170,6 +170,26 @@ pub fn eval_expression(expression: &Expression, local_context: &mut EvalLocalCon
                 Value::Void
             }
         }
+        Expression::ArrayIndex { array, index } => {
+            let array = eval_expression(array, local_context);
+            let index = eval_expression(index, local_context);
+            match (array, index) {
+                (Value::Array(vec), Value::Number(index)) => {
+                    vec.as_slice().get(index as usize).cloned().unwrap_or(Value::Void)
+                }
+                (Value::Model(model), Value::Number(index)) => {
+                    if (index as usize) < model.row_count() {
+                        model.model_tracker().track_row_data_changes(index as usize);
+                        model.row_data(index as usize)
+                    } else {
+                        Value::Void
+                    }
+                }
+                _ => {
+                    Value::Void
+                }
+            }
+        }
         Expression::Cast { from, to } => {
             let v = eval_expression(&*from, local_context);
             match (v, to) {
@@ -255,6 +275,16 @@ pub fn eval_expression(expression: &Expression, local_context: &mut EvalLocalCon
             Expression::BuiltinFunctionReference(BuiltinFunction::ATan, _) => {
                 let x: f64 = eval_expression(&arguments[0], local_context).try_into().unwrap();
                 Value::Number(x.atan().to_degrees())
+            }
+            Expression::BuiltinFunctionReference(BuiltinFunction::Log, _) => {
+                let x: f64 = eval_expression(&arguments[0], local_context).try_into().unwrap();
+                let y: f64 = eval_expression(&arguments[1], local_context).try_into().unwrap();
+                Value::Number(x.log(y))
+            }
+            Expression::BuiltinFunctionReference(BuiltinFunction::Pow, _) => {
+                let x: f64 = eval_expression(&arguments[0], local_context).try_into().unwrap();
+                let y: f64 = eval_expression(&arguments[1], local_context).try_into().unwrap();
+                Value::Number(x.powf(y))
             }
             Expression::BuiltinFunctionReference(BuiltinFunction::SetFocusItem, _) => {
                 if arguments.len() != 1 {
@@ -551,8 +581,8 @@ pub fn eval_expression(expression: &Expression, local_context: &mut EvalLocalCon
                 .map(|(k, v)| (k.clone(), eval_expression(v, local_context)))
                 .collect(),
         ),
-        Expression::PathElements { elements } => {
-            Value::PathElements(convert_path(elements, local_context))
+        Expression::PathData(data)  => {
+            Value::PathData(convert_path(data, local_context))
         }
         Expression::StoreLocalVariable { name, value } => {
             let value = eval_expression(value, local_context);
@@ -707,6 +737,25 @@ fn eval_assignment(lhs: &Expression, op: char, rhs: Value, local_context: &mut E
                 },
             )
         }
+        Expression::ArrayIndex { array, index } => {
+            let array = eval_expression(&array, local_context);
+            let index = eval_expression(&index, local_context);
+            match (array, index) {
+                (Value::Model(model), Value::Number(index)) => {
+                    let index = index as usize;
+                    if (index) < model.row_count() {
+                        if op == '=' {
+                            model.set_row_data(index, rhs);
+                        } else {
+                            model.set_row_data(index, eval(model.row_data(index)));
+                        }
+                    }
+                }
+                _ => {
+                    eprintln!("Attempting to write into an array that cannot be written");
+                }
+            }
+        }
         _ => panic!("typechecking should make sure this was a PropertyReference"),
     }
 }
@@ -837,7 +886,7 @@ fn check_value_type(value: &Value, ty: &Type) -> bool {
         Type::Model => {
             matches!(value, Value::Model(_) | Value::Bool(_) | Value::Number(_) | Value::Array(_))
         }
-        Type::PathElements => matches!(value, Value::PathElements(_)),
+        Type::PathData => matches!(value, Value::PathData(_)),
         Type::Easing => matches!(value, Value::EasingCurve(_)),
         Type::Brush => matches!(value, Value::Brush(_)),
         Type::Array(inner) => {
@@ -1015,52 +1064,30 @@ pub fn new_struct_with_bindings<ElementType: 'static + Default + corelib::rtti::
 }
 
 fn convert_from_lyon_path<'a>(
-    it: impl IntoIterator<Item = &'a lyon_path::Event<lyon_path::math::Point, lyon_path::math::Point>>,
+    events_it: impl IntoIterator<Item = &'a sixtyfps_compilerlib::expression_tree::Expression>,
+    points_it: impl IntoIterator<Item = &'a sixtyfps_compilerlib::expression_tree::Expression>,
+    local_context: &mut EvalLocalContext,
 ) -> PathData {
-    use corelib::graphics::PathEvent;
-    use lyon_path::Event;
-
-    let mut coordinates = Vec::new();
-
-    let events = it
+    let events = events_it
         .into_iter()
-        .map(|event| match event {
-            Event::Begin { at } => {
-                coordinates.push(at);
-                PathEvent::Begin
-            }
-            Event::Line { from, to } => {
-                coordinates.push(from);
-                coordinates.push(to);
-                PathEvent::Line
-            }
-            Event::Quadratic { from, ctrl, to } => {
-                coordinates.push(from);
-                coordinates.push(ctrl);
-                coordinates.push(to);
-                PathEvent::Quadratic
-            }
-            Event::Cubic { from, ctrl1, ctrl2, to } => {
-                coordinates.push(from);
-                coordinates.push(ctrl1);
-                coordinates.push(ctrl2);
-                coordinates.push(to);
-                PathEvent::Cubic
-            }
-            Event::End { close, .. } => {
-                if *close {
-                    PathEvent::EndClosed
-                } else {
-                    PathEvent::EndOpen
-                }
-            }
-        })
-        .collect::<Vec<_>>();
+        .map(|event_expr| eval_expression(event_expr, local_context).try_into().unwrap())
+        .collect::<SharedVector<_>>();
 
-    PathData::Events(
-        SharedVector::from(events.as_slice()),
-        coordinates.into_iter().cloned().collect::<SharedVector<_>>(),
-    )
+    let points = points_it
+        .into_iter()
+        .map(|point_expr| {
+            let point_value = eval_expression(point_expr, local_context);
+            let point_struct: Struct = point_value.try_into().unwrap();
+            let mut point = sixtyfps_corelib::graphics::Point::default();
+            let x: f64 = point_struct.get_field("x").unwrap().clone().try_into().unwrap();
+            let y: f64 = point_struct.get_field("y").unwrap().clone().try_into().unwrap();
+            point.x = x as _;
+            point.y = y as _;
+            point
+        })
+        .collect::<SharedVector<_>>();
+
+    PathData::Events(events, points)
 }
 
 pub fn convert_path(path: &ExprPath, local_context: &mut EvalLocalContext) -> PathData {
@@ -1071,7 +1098,9 @@ pub fn convert_path(path: &ExprPath, local_context: &mut EvalLocalContext) -> Pa
                 .map(|element| convert_path_element(element, local_context))
                 .collect::<SharedVector<PathElement>>(),
         ),
-        ExprPath::Events(events) => convert_from_lyon_path(events.iter()),
+        ExprPath::Events(events, points) => {
+            convert_from_lyon_path(events.iter(), points.iter(), local_context)
+        }
     }
 }
 
@@ -1128,7 +1157,7 @@ pub fn default_value_for_type(ty: &Type) -> Value {
         Type::Void | Type::Invalid => Value::Void,
         Type::Model => Value::Void,
         Type::UnitProduct(_) => Value::Number(0.),
-        Type::PathElements => Value::PathElements(Default::default()),
+        Type::PathData => Value::PathData(Default::default()),
         Type::LayoutCache => Value::LayoutCache(Default::default()),
         Type::InferredProperty
         | Type::InferredCallback

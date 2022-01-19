@@ -53,6 +53,7 @@ impl Default for LayoutInfo {
 
 impl LayoutInfo {
     // Note: This "logic" is duplicated in the cpp generator's generated code for merging layout infos.
+    #[must_use]
     pub fn merge(&self, other: &LayoutInfo) -> Self {
         Self {
             min: self.min.max(other.min),
@@ -333,7 +334,7 @@ impl Default for Constraint {
 }
 
 #[repr(C)]
-#[derive(Debug, Default)]
+#[derive(Copy, Clone, Debug, Default)]
 pub struct Padding {
     pub begin: Coord,
     pub end: Coord,
@@ -344,7 +345,7 @@ pub struct Padding {
 pub struct GridLayoutData<'a> {
     pub size: Coord,
     pub spacing: Coord,
-    pub padding: &'a Padding,
+    pub padding: Padding,
     pub cells: Slice<'a, GridLayoutCellData>,
 }
 
@@ -431,7 +432,7 @@ impl Default for LayoutAlignment {
 pub struct BoxLayoutData<'a> {
     pub size: Coord,
     pub spacing: Coord,
-    pub padding: &'a Padding,
+    pub padding: Padding,
     pub alignment: LayoutAlignment,
     pub cells: Slice<'a, BoxLayoutCellData>,
 }
@@ -597,8 +598,8 @@ pub fn box_layout_info_ortho(cells: Slice<BoxLayoutCellData>, padding: &Padding)
 
 #[cfg(feature = "std")]
 #[repr(C)]
-pub struct PathLayoutData<'a> {
-    pub elements: &'a crate::graphics::PathData,
+pub struct PathLayoutData {
+    pub elements: crate::graphics::PathData,
     pub item_count: u32,
     pub x: Coord,
     pub y: Coord,

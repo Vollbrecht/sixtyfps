@@ -1,3 +1,6 @@
+# Copyright © SixtyFPS GmbH <info@sixtyfps.io>
+# SPDX-License-Identifier: (GPL-3.0-only OR LicenseRef-SixtyFPS-commercial)
+
 [package]
 name = "sixtyfps-corelib"
 version = "0.1.6"
@@ -7,7 +10,8 @@ license = "(GPL-3.0-only OR LicenseRef-SixtyFPS-commercial)"
 description = "Internal SixtyFPS runtime library."
 repository = "https://github.com/sixtyfpsui/sixtyfps"
 homepage = "https://sixtyfps.io"
-
+categories = ["gui", "development-tools"]
+keywords = ["gui", "ui", "toolkit", "graphics", "design"]
 
 [lib]
 path = "lib.rs"

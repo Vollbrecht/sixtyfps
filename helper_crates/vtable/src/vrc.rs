@@ -11,7 +11,9 @@ use core::convert::TryInto;
 ///
 /// It is implemented if the macro has a "drop_in_place" function.
 ///
-/// Safety: the implementation of drop_in_place and dealloc must be correct
+/// # Safety
+///
+/// The implementation of drop_in_place and dealloc must be correct
 pub unsafe trait VTableMetaDropInPlace: VTableMeta {
     /// # Safety
     /// The target ptr argument needs to be pointing to a an instance of the VTable
@@ -350,7 +352,7 @@ impl<VTable: VTableMetaDropInPlace + 'static, MappedType: ?Sized> Clone
     for VRcMapped<VTable, MappedType>
 {
     fn clone(&self) -> Self {
-        Self { parent_strong: self.parent_strong.clone(), object: self.object.clone() }
+        Self { parent_strong: self.parent_strong.clone(), object: self.object }
     }
 }
 
@@ -358,10 +360,7 @@ impl<VTable: VTableMetaDropInPlace + 'static, MappedType: ?Sized> VRcMapped<VTab
     /// Returns a new [`VWeakMapped`] that points to this instance and can be upgraded back to
     /// a [`Self`] as long as a `VRc`/`VMapped` exists.
     pub fn downgrade(this: &Self) -> VWeakMapped<VTable, MappedType> {
-        VWeakMapped {
-            parent_weak: VRc::downgrade(&this.parent_strong),
-            object: this.object.clone(),
-        }
+        VWeakMapped { parent_weak: VRc::downgrade(&this.parent_strong), object: this.object }
     }
 
     /// Create a Pinned reference to the mapped type.
@@ -419,7 +418,7 @@ impl<VTable: VTableMetaDropInPlace + 'static, MappedType: ?Sized> VWeakMapped<VT
     pub fn upgrade(&self) -> Option<VRcMapped<VTable, MappedType>> {
         self.parent_weak
             .upgrade()
-            .map(|parent| VRcMapped { parent_strong: parent, object: self.object.clone() })
+            .map(|parent| VRcMapped { parent_strong: parent, object: self.object })
     }
 }
 
@@ -427,6 +426,14 @@ impl<VTable: VTableMetaDropInPlace + 'static, MappedType: ?Sized> Clone
     for VWeakMapped<VTable, MappedType>
 {
     fn clone(&self) -> Self {
-        Self { parent_weak: self.parent_weak.clone(), object: self.object.clone() }
+        Self { parent_weak: self.parent_weak.clone(), object: self.object }
+    }
+}
+
+impl<VTable: VTableMetaDropInPlace + 'static, MappedType> Default
+    for VWeakMapped<VTable, MappedType>
+{
+    fn default() -> Self {
+        Self { parent_weak: VWeak::default(), object: core::ptr::null() }
     }
 }

@@ -3,16 +3,19 @@
 
 use anyhow::Context;
 use std::iter::Extend;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 // cspell::ignore compat constexpr corelib sharedvector pathdata
 
-fn ensure_cargo_rerun_for_crate(crate_dir: &Path) -> anyhow::Result<()> {
-    println!("cargo:rerun-if-changed={}", crate_dir.display());
+fn ensure_cargo_rerun_for_crate(
+    crate_dir: &Path,
+    dependencies: &mut Vec<PathBuf>,
+) -> anyhow::Result<()> {
+    dependencies.push(crate_dir.to_path_buf());
     for entry in std::fs::read_dir(crate_dir)? {
         let entry = entry?;
         if entry.path().extension().map_or(false, |e| e == "rs") {
-            println!("cargo:rerun-if-changed={}", entry.path().display());
+            dependencies.push(entry.path());
         }
     }
     Ok(())
@@ -76,7 +79,11 @@ extern "C" {{
     )
 }
 
-fn gen_corelib(root_dir: &Path, include_dir: &Path) -> anyhow::Result<()> {
+fn gen_corelib(
+    root_dir: &Path,
+    include_dir: &Path,
+    dependencies: &mut Vec<PathBuf>,
+) -> anyhow::Result<()> {
     let mut config = default_config();
 
     let items = [
@@ -150,6 +157,7 @@ fn gen_corelib(root_dir: &Path, include_dir: &Path) -> anyhow::Result<()> {
         "sixtyfps_color_darker",
         "sixtyfps_image_size",
         "sixtyfps_image_path",
+        "TimerMode", // included in generated_public.h
     ]
     .iter()
     .map(|x| x.to_string())
@@ -158,7 +166,7 @@ fn gen_corelib(root_dir: &Path, include_dir: &Path) -> anyhow::Result<()> {
     let mut crate_dir = root_dir.to_owned();
     crate_dir.extend(["sixtyfps_runtime", "corelib"].iter());
 
-    ensure_cargo_rerun_for_crate(&crate_dir)?;
+    ensure_cargo_rerun_for_crate(&crate_dir, dependencies)?;
 
     let mut string_config = config.clone();
     string_config.export.exclude = vec!["SharedString".into()];
@@ -296,6 +304,36 @@ fn gen_corelib(root_dir: &Path, include_dir: &Path) -> anyhow::Result<()> {
             .write_to_file(include_dir.join(internal_header));
     }
 
+    // Generate a header file with some public API (enums, etc.)
+    let mut public_config = config.clone();
+    public_config.namespaces = Some(vec!["sixtyfps".into()]);
+    public_config.export.item_types = vec![cbindgen::ItemType::Enums];
+    public_config.export.include = vec!["TimerMode".into()];
+    public_config.export.exclude.clear();
+
+    cbindgen::Builder::new()
+        .with_config(public_config)
+        .with_src(crate_dir.join("timers.rs"))
+        .with_after_include(format!(
+            r"
+/// This macro expands to the to the numeric value of the major version of SixtyFPS you're
+/// developing against. For example if you're using version 1.5.2, this macro will expand to 1.
+#define SIXTYFPS_VERSION_MAJOR {}
+/// This macro expands to the to the numeric value of the minor version of SixtyFPS you're
+/// developing against. For example if you're using version 1.5.2, this macro will expand to 5.
+#define SIXTYFPS_VERSION_MINOR {}
+/// This macro expands to the to the numeric value of the patch version of SixtyFPS you're
+/// developing against. For example if you're using version 1.5.2, this macro will expand to 2.
+#define SIXTYFPS_VERSION_PATCH {}
+",
+            env!("CARGO_PKG_VERSION_MAJOR"),
+            env!("CARGO_PKG_VERSION_MINOR"),
+            env!("CARGO_PKG_VERSION_PATCH"),
+        ))
+        .generate()
+        .context("Unable to generate bindings for sixtyfps_generated_public.h")?
+        .write_to_file(include_dir.join("sixtyfps_generated_public.h"));
+
     config.export.body.insert(
         "ItemTreeNode".to_owned(),
         "    constexpr ItemTreeNode(Item_Body x) : item {x} {}
@@ -335,16 +373,7 @@ fn gen_corelib(root_dir: &Path, include_dir: &Path) -> anyhow::Result<()> {
         .with_include("sixtyfps_image.h")
         .with_include("sixtyfps_pathdata.h")
         .with_include("sixtyfps_brush.h")
-        .with_header(format!(
-            r"
-#define SIXTYFPS_VERSION_MAJOR {}
-#define SIXTYFPS_VERSION_MINOR {}
-#define SIXTYFPS_VERSION_PATCH {}
-",
-            env!("CARGO_PKG_VERSION_MAJOR"),
-            env!("CARGO_PKG_VERSION_MINOR"),
-            env!("CARGO_PKG_VERSION_PATCH"),
-        ))
+        .with_include("sixtyfps_generated_public.h")
         .with_after_include(
             r"
 namespace sixtyfps {
@@ -367,7 +396,11 @@ namespace sixtyfps {
     Ok(())
 }
 
-fn gen_backend_qt(root_dir: &Path, include_dir: &Path) -> anyhow::Result<()> {
+fn gen_backend_qt(
+    root_dir: &Path,
+    include_dir: &Path,
+    dependencies: &mut Vec<PathBuf>,
+) -> anyhow::Result<()> {
     let mut config = default_config();
 
     let items = [
@@ -395,7 +428,7 @@ fn gen_backend_qt(root_dir: &Path, include_dir: &Path) -> anyhow::Result<()> {
     let mut crate_dir = root_dir.to_owned();
     crate_dir.extend(["sixtyfps_runtime", "rendering_backends", "qt"].iter());
 
-    ensure_cargo_rerun_for_crate(&crate_dir)?;
+    ensure_cargo_rerun_for_crate(&crate_dir, dependencies)?;
 
     cbindgen::Builder::new()
         .with_config(config)
@@ -409,12 +442,16 @@ fn gen_backend_qt(root_dir: &Path, include_dir: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn gen_backend(root_dir: &Path, include_dir: &Path) -> anyhow::Result<()> {
+fn gen_backend(
+    root_dir: &Path,
+    include_dir: &Path,
+    dependencies: &mut Vec<PathBuf>,
+) -> anyhow::Result<()> {
     let config = default_config();
     let mut crate_dir = root_dir.to_owned();
     crate_dir.extend(["api", "sixtyfps-cpp"].iter());
 
-    ensure_cargo_rerun_for_crate(&crate_dir)?;
+    ensure_cargo_rerun_for_crate(&crate_dir, dependencies)?;
 
     cbindgen::Builder::new()
         .with_config(config)
@@ -427,20 +464,67 @@ fn gen_backend(root_dir: &Path, include_dir: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn gen_interpreter(root_dir: &Path, include_dir: &Path) -> anyhow::Result<()> {
+fn gen_interpreter(
+    root_dir: &Path,
+    include_dir: &Path,
+    dependencies: &mut Vec<PathBuf>,
+) -> anyhow::Result<()> {
     let mut config = default_config();
     // Avoid Value, just export ValueOpaque.
-    config.export.exclude.push("Value".into());
+    config.export.exclude = IntoIterator::into_iter([
+        "Value",
+        "ValueType",
+        "PropertyDescriptor",
+        "Diagnostic",
+        "PropertyDescriptor",
+    ])
+    .map(String::from)
+    .collect();
     let mut crate_dir = root_dir.to_owned();
 
     crate_dir.extend(["sixtyfps_runtime", "interpreter"].iter());
-    ensure_cargo_rerun_for_crate(&crate_dir)?;
+    ensure_cargo_rerun_for_crate(&crate_dir, dependencies)?;
+
+    // Generate a header file with some public API (enums, etc.)
+    let mut public_config = config.clone();
+    public_config.namespaces = Some(vec!["sixtyfps".into(), "interpreter".into()]);
+    public_config.export.item_types = vec![cbindgen::ItemType::Enums, cbindgen::ItemType::Structs];
+
+    public_config.export.exclude = IntoIterator::into_iter([
+        "ComponentCompilerOpaque",
+        "ComponentDefinitionOpaque",
+        "ModelAdaptorVTable",
+        "StructIteratorOpaque",
+        "ComponentInstance",
+        "StructIteratorResult",
+        "ValueOpaque",
+        "StructOpaque",
+        "ModelNotifyOpaque",
+    ])
+    .map(String::from)
+    .collect();
+
+    cbindgen::Builder::new()
+        .with_config(public_config)
+        .with_crate(crate_dir.clone())
+        .generate()
+        .context("Unable to generate bindings for sixtyfps_interpreter_generated_public.h")?
+        .write_to_file(include_dir.join("sixtyfps_interpreter_generated_public.h"));
 
     cbindgen::Builder::new()
         .with_config(config)
         .with_crate(crate_dir)
         .with_include("sixtyfps_internal.h")
-        .with_after_include("namespace sixtyfps::cbindgen_private { struct Value; }")
+        .with_include("sixtyfps_interpreter_generated_public.h")
+        .with_after_include(
+            r"
+            namespace sixtyfps::cbindgen_private {
+                struct Value;
+                using sixtyfps::interpreter::ValueType;
+                using sixtyfps::interpreter::PropertyDescriptor;
+                using sixtyfps::interpreter::Diagnostic;
+            }",
+        )
         .generate()
         .context("Unable to generate bindings for sixtyfps_interpreter_internal.h")?
         .write_to_file(include_dir.join("sixtyfps_interpreter_internal.h"));
@@ -451,12 +535,15 @@ fn gen_interpreter(root_dir: &Path, include_dir: &Path) -> anyhow::Result<()> {
 /// Generate the headers.
 /// `root_dir` is the root directory of the sixtyfps git repo
 /// `include_dir` is the output directory
-pub fn gen_all(root_dir: &Path, include_dir: &Path) -> anyhow::Result<()> {
+/// Returns the list of all paths that contain dependencies to the generated output. If you call this
+/// function from build.rs, feed each entry to stdout prefixed with `cargo:rerun-if-changed=`.
+pub fn gen_all(root_dir: &Path, include_dir: &Path) -> anyhow::Result<Vec<PathBuf>> {
     proc_macro2::fallback::force(); // avoid a abort if panic=abort is set
     std::fs::create_dir_all(include_dir).context("Could not create the include directory")?;
-    gen_corelib(root_dir, include_dir)?;
-    gen_backend_qt(root_dir, include_dir)?;
-    gen_backend(root_dir, include_dir)?;
-    gen_interpreter(root_dir, include_dir)?;
-    Ok(())
+    let mut deps = Vec::new();
+    gen_corelib(root_dir, include_dir, &mut deps)?;
+    gen_backend_qt(root_dir, include_dir, &mut deps)?;
+    gen_backend(root_dir, include_dir, &mut deps)?;
+    gen_interpreter(root_dir, include_dir, &mut deps)?;
+    Ok(deps)
 }

@@ -374,14 +374,14 @@ pub fn sixtyfps(stream: TokenStream) -> TokenStream {
     }
 
     compiler_config.include_paths = include_paths;
-    let (root_component, mut diag) =
+    let (root_component, diag) =
         spin_on::spin_on(compile_syntax_node(syntax_node, diag, compiler_config));
     //println!("{:#?}", tree);
     if diag.has_error() {
         return diag.report_macro_diagnostic(&tokens);
     }
 
-    let mut result = generator::rust::generate(&root_component, &mut diag);
+    let mut result = generator::rust::generate(&root_component);
 
     // Make sure to recompile if any of the external files changes
     let reload = diag
@@ -390,11 +390,9 @@ pub fn sixtyfps(stream: TokenStream) -> TokenStream {
         .filter(|path| path.is_absolute() && !path.ends_with("Cargo.toml"))
         .filter_map(|p| p.to_str())
         .map(|p| quote! {const _ : &'static [u8] = ::core::include_bytes!(#p);});
-    if let Some(x) = result.as_mut() {
-        x.extend(reload);
-        x.extend(quote! {const _ : Option<&'static str> = ::core::option_env!("SIXTYFPS_STYLE");});
-    }
 
-    let diags = diag.report_macro_diagnostic(&tokens);
-    result.map_or(diags, |r| r.into())
+    result.extend(reload);
+    result.extend(quote! {const _ : Option<&'static str> = ::core::option_env!("SIXTYFPS_STYLE");});
+
+    result.into()
 }
