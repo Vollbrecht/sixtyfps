@@ -1,5 +1,5 @@
-// Copyright © SixtyFPS GmbH <info@sixtyfps.io>
-// SPDX-License-Identifier: (GPL-3.0-only OR LicenseRef-SixtyFPS-commercial)
+// Copyright © SixtyFPS GmbH <info@slint-ui.com>
+// SPDX-License-Identifier: GPL-3.0-only OR LicenseRef-Slint-commercial
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -28,17 +28,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("cargo:rustc-env=CPP_LIB_PATH={}", target_dir.display());
 
-    let generated_include_dir = std::env::var_os("DEP_SIXTYFPS_CPP_GENERATED_INCLUDE_DIR")
-        .expect("the sixtyfps-cpp crate needs to provide the meta-data that points to the directory with the generated includes");
+    let generated_include_dir = std::env::var_os("DEP_SLINT_CPP_GENERATED_INCLUDE_DIR")
+        .expect("the slint-cpp crate needs to provide the meta-data that points to the directory with the generated includes");
     println!(
         "cargo:rustc-env=GENERATED_CPP_HEADERS_PATH={}",
         Path::new(&generated_include_dir).display()
     );
     let root_dir = root_dir();
-    println!(
-        "cargo:rustc-env=CPP_API_HEADERS_PATH={}/api/sixtyfps-cpp/include",
-        root_dir.display()
-    );
+    println!("cargo:rustc-env=CPP_API_HEADERS_PATH={}/api/cpp/include", root_dir.display());
 
     let tests_file_path =
         std::path::Path::new(&std::env::var_os("OUT_DIR").unwrap()).join("test_functions.rs");

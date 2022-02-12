@@ -1,10 +1,10 @@
-// Copyright © SixtyFPS GmbH <info@sixtyfps.io>
-// SPDX-License-Identifier: (GPL-3.0-only OR LicenseRef-SixtyFPS-commercial)
+// Copyright © SixtyFPS GmbH <info@slint-ui.com>
+// SPDX-License-Identifier: GPL-3.0-only OR LicenseRef-Slint-commercial
 
 use std::io::Write;
 
-use sixtyfps_compilerlib::object_tree;
-use sixtyfps_compilerlib::parser::{syntax_nodes, SyntaxNode};
+use i_slint_compiler::object_tree;
+use i_slint_compiler::parser::{syntax_nodes, SyntaxNode};
 
 /// Replace the 'color' type with 'brush', and the 'resource' type with 'image', and the 'logical_length' to 'length'
 pub(crate) fn fold_node(

@@ -9,7 +9,7 @@ These properties are valid on all visible items
 * **`width`** and **`height`** (*length*): The size of the element. When set, this overrides the default size.
 * **`max-width`** and **`max-height`** (*length*): The maximum size of an element when used in a layout.
 * **`min-width`** and **`min-height`** (*length*): The minimum size of an element when used in a layout.
-* **`preferred-width`** and **`preferred-height`** (*length*): The preferred size of an element when used in a layout. 
+* **`preferred-width`** and **`preferred-height`** (*length*): The preferred size of an element when used in a layout.
 * **`col`**, **`row`**, **`colspan`**, **`rowspan`** (*int*): See [`GridLayout`](#gridlayout).
 * **`horizontal-stretch`** and **`vertical-stretch`** (*float*): Specify how much relative space these elements are stretching in a layout.
   When 0, this means that the elements will not be stretched unless all elements are 0. Builtin widgets have a value of either 0 or 1
@@ -74,7 +74,7 @@ When not part of a layout, its width or height defaults to 100% of the parent el
 
 ### Example
 
-```60
+```slint
 Example := Window {
     width: 270px;
     height: 100px;
@@ -130,7 +130,7 @@ An Image can be used to represent an image loaded from an image file.
 ### Properties
 
 * **`source`** (*image*): The image to load. In order to reference image, one uses the `@image-url("...")` macro
-  which loads the file relative to the directory containing the .60 file.
+  which loads the file relative to the directory containing the .slint file.
 * **`source-clip-x`**, **`source-clip-y`**, **`source-clip-width`**, **`source-clip-height`** (*int*): properties in source
   image coordinates that, when specified, can be used to render only a portion of the specified image.
 * **`image-fit`** (*enum*): Specifies how the source image shall be fit into the image element. Possible values are:
@@ -153,15 +153,15 @@ An Image can be used to represent an image loaded from an image file.
 
 ### Example
 
-```60
+```slint
 Example := Window {
     VerticalLayout {
         Image {
-            source: @image-url("https://sixtyfps.io/resources/logo_scaled.png");
+            source: @image-url("https://slint-ui.com/logo/slint-logo-full-light.svg");
             // image-fit default is `contain` when in layout, preserving aspect ratio
         }
         Image {
-            source: @image-url("https://sixtyfps.io/resources/logo_scaled.png");
+            source: @image-url("https://slint-ui.com/logo/slint-logo-full-light.svg");
             colorize: red;
         }
     }
@@ -170,10 +170,10 @@ Example := Window {
 
 Scaled while preserving the aspect ratio:
 
-```60
+```slint
 Example := Window {
     Image {
-        source: @image-url("https://sixtyfps.io/resources/logo_scaled.png");
+        source: @image-url("https://slint-ui.com/logo/slint-logo-full-light.svg");
         width: 270px;
         // implicit default, preserving aspect ratio: height: self.width * natural_height / natural_width;
     }
@@ -209,7 +209,7 @@ and the text itself.
 
 This example shows the text "Hello World" in red, using the default font:
 
-```60
+```slint
 Example := Window {
     width: 270px;
     height: 100px;
@@ -224,7 +224,7 @@ Example := Window {
 This example breaks a longer paragraph of text into multiple lines, by setting a `wrap`
 policy and assigning a limited `width` and enough `height` for the text to flow down:
 
-```60
+```slint
 Example := Window {
     width: 270px;
     height: 300px;
@@ -248,7 +248,7 @@ When not part of a layout, its width or height defaults to 100% of the parent el
 A path can be defined in two different ways:
 
 * Using SVG path commands as a string
-* Using path command elements in `.60` markup.
+* Using path command elements in `.slint` markup.
 
 The coordinates used in the geometric commands are within the imaginary coordinate system of the path.
 When rendering on the screen, the shape is drawn relative to the `x` and `y` properties. If the `width`
@@ -277,11 +277,11 @@ accordingly.
 
 SVG is a popular file format for defining scalable graphics, which are often composed of paths. In SVG
 paths are composed using [commands](https://developer.mozilla.org/en-US/docs/Web/SVG/Attribute/d#path_commands),
-which in turn are written in a string literal. In `.60` the path commands are provided to the `commands`
+which in turn are written in a string. In `.slint` the path commands are provided to the `commands`
 property. The following example renders a shape consists of an arc and a rectangle, composed of `line-to`,
 `move-to` and `arc` commands:
 
-```60
+```slint
 Example := Path {
     width: 100px;
     height: 100px;
@@ -293,14 +293,14 @@ Example := Path {
 
 The commands are provided in a property:
 
-* **`commands`** (*string): A string literal providing the commands according to the SVG path specification.
+* **`commands`** (*string): A string providing the commands according to the SVG path specification.
 
 #### Path Using SVG Path Elements
 
 The shape of the path can also be described using elements that resemble the SVG path commands but use the
-`.60` markup syntax. The earlier example using SVG commands can also be written like that:
+`.slint` markup syntax. The earlier example using SVG commands can also be written like that:
 
-```60
+```slint
 Example := Path {
     width: 100px;
     height: 100px;
@@ -430,7 +430,7 @@ When not part of a layout, its width or height default to 100% of the parent ele
 
 ### Example
 
-```60
+```slint
 Example := Window {
     width: 200px;
     height: 100px;
@@ -460,7 +460,7 @@ The FocusScope exposes callback to intercept the pressed key when it has focus.
 
 The KeyEvent has a text property which is a character of the key entered.
 When a non-printable key is pressed, the character will be either a control character,
-or it will be mapped to a private unicode character. The mapping of these non-printable, special characters is available in the `Keys` namespace
+or it will be mapped to a private unicode character. The mapping of these non-printable, special characters is available in the [`Keys`](#keys) namespace
 
 ### Properties
 
@@ -477,7 +477,7 @@ or it will be mapped to a private unicode character. The mapping of these non-pr
 
 ### Example
 
-```60
+```slint
 Example := Window {
     forward-focus: my-key-handler;
     my-key-handler := FocusScope {
@@ -512,7 +512,7 @@ they will be computed by the layout respecting the minimum and maximum sizes and
 
 ## Example
 
-```60
+```slint
 Foo := Window {
     width: 200px;
     height: 100px;
@@ -544,7 +544,7 @@ Alternatively, the item can be put in a `Row` element.
 
 This example uses the `Row` element
 
-```60
+```slint
 Foo := Window {
     width: 200px;
     height: 200px;
@@ -564,7 +564,7 @@ Foo := Window {
 
 This example uses the `col` and `row` properties
 
-```60
+```slint
 Foo := Window {
     width: 200px;
     height: 150px;
@@ -603,7 +603,7 @@ When not part of a layout, its width or height defaults to 100% of the parent el
 
 ### Example
 
-```60
+```slint
 Example := Window {
     width: 270px;
     height: 100px;
@@ -651,7 +651,7 @@ When not part of a layout, its width or height defaults to 100% of the parent el
 
 ### Example
 
-```60
+```slint
 Example := Window {
     width: 270px;
     height: 100px;
@@ -674,7 +674,7 @@ Note: It is not allowed to access properties of elements within the popup from o
 
 ### Example
 
-```60
+```slint
 Example := Window {
     width: 100px;
     height: 100px;
@@ -700,14 +700,15 @@ And the window can have any number of `StandardButton` widgets or other button
 with the `dialog-button-role` property.
 The button will be layed out in an order that depends on the platform.
 
-The `kind` property of the `StandardButton`s and the ``dialog-button-role` properties needs to be set to a specific value,
+The `kind` property of the `StandardButton`s and the `dialog-button-role` properties needs to be set to a specific value,
 it cannot be a complex expression.
 There cannot be several StandardButton of the same kind.
 
-If A callback `<kind>_clicked` is automatically added for each StandardButton which does not have an explicit
+A callback `<kind>_clicked` is automatically added for each StandardButton which does not have an explicit
 callback handler, so it can be handled from the native code. (e.g. if there is a button of kind `cancel`,
-a `cancel_clicked` callback will be added)
-When viewed with the `sixtyfps-viewer` program, the `ok`, `cancel`, and `close` button will cause the dialog to close.
+a `cancel_clicked` callback will be added).
+
+When viewed with the `slint-viewer` program, the `ok`, `cancel`, and `close` button will cause the dialog to close.
 
 ### Properties
 
@@ -716,8 +717,8 @@ When viewed with the `sixtyfps-viewer` program, the `ok`, `cancel`, and `close` 
 
 ### Example
 
-```60
-import { StandardButton, Button } from "sixtyfps_widgets.60";
+```slint
+import { StandardButton, Button } from "std-widgets.slint";
 Example := Dialog {
     Text {
       text: "This is a dialog box";
@@ -778,7 +779,7 @@ This structure is generated and passed to the `pointer-event` callback of the `T
 
 # Builtin Enums
 
-The default value of each enum type is always the first value
+The default value of each enum type is always the first value.
 
 ## `TextHorizontalAlignment`
 
@@ -888,3 +889,62 @@ Depending on the backend and used OS unidirectional resize cursors may be replac
 * **`ns-resize`**: Bidirectional resize north-south.
 * **`nesw-resize`**: Bidirectional resize north-east-south-west.
 * **`nwse-resize`**: Bidirectional resize north-west-south-east.
+
+# Namespaces
+
+The following namespaces provide access to common constants such as special keys or named colors.
+
+## `Keys`
+
+Use the constants in the `Keys` namespace to handle pressing of keys that don't have a printable character. Check the value of [`KeyEvent`](#keyevent)'s `text` property
+against the constants below.
+
+* **`Backspace`**
+* **`Tab`**
+* **`Return`**
+* **`Escape`**
+* **`Backtab`**
+* **`Delete`**
+* **`UpArrow`**
+* **`DownArrow`**
+* **`LeftArrow`**
+* **`RightArrow`**
+* **`F1`**
+* **`F2`**
+* **`F3`**
+* **`F4`**
+* **`F5`**
+* **`F6`**
+* **`F7`**
+* **`F8`**
+* **`F9`**
+* **`F10`**
+* **`F11`**
+* **`F12`**
+* **`F13`**
+* **`F14`**
+* **`F15`**
+* **`F16`**
+* **`F17`**
+* **`F18`**
+* **`F19`**
+* **`F20`**
+* **`F21`**
+* **`F22`**
+* **`F23`**
+* **`F24`**
+* **`Insert`**
+* **`Home`**
+* **`End`**
+* **`PageUp`**
+* **`PageDown`**
+* **`ScrollLock`**
+* **`Pause`**
+* **`SysReq`**
+* **`Stop`**
+* **`Menu`**
+
+## `Colors`
+
+Use the colors namespace to select colors by their name. For example you can use `Colors.aquamarine` or `Colors.bisque`.
+The entire list of names is very long. You can find a complete list in the [CSS Specification](https://www.w3.org/TR/css-color-3/#svg-color).

@@ -1,5 +1,5 @@
-// Copyright © SixtyFPS GmbH <info@sixtyfps.io>
-// SPDX-License-Identifier: (GPL-3.0-only OR LicenseRef-SixtyFPS-commercial)
+// Copyright © SixtyFPS GmbH <info@slint-ui.com>
+// SPDX-License-Identifier: GPL-3.0-only OR LicenseRef-Slint-commercial
 
 use once_cell::sync::Lazy;
 use std::collections::{HashMap, HashSet};
@@ -15,6 +15,8 @@ use lsp_types::notification::Notification;
 use clap::Parser;
 
 use crate::lsp_ext::{Health, ServerStatusNotification, ServerStatusParams};
+
+use slint_interpreter::ComponentHandle;
 
 #[derive(PartialEq)]
 enum RequestedGuiEventLoopState {
@@ -44,7 +46,7 @@ unsafe impl Sync for FutureRunner {}
 
 impl Wake for FutureRunner {
     fn wake(self: Arc<Self>) {
-        sixtyfps_rendering_backend_default::backend().post_event(Box::new(move || {
+        i_slint_backend_selector::backend().post_event(Box::new(move || {
             let waker = self.clone().into();
             let mut cx = std::task::Context::from_waker(&waker);
             let mut fut_opt = self.fut.lock().unwrap();
@@ -89,7 +91,7 @@ pub fn start_ui_event_loop() {
 
         if *state_requested == RequestedGuiEventLoopState::StartLoop {
             // Send an event so that once the loop is started, we notify the LSP thread that it can send more events
-            sixtyfps_rendering_backend_default::backend().post_event(Box::new(|| {
+            i_slint_backend_selector::backend().post_event(Box::new(|| {
                 let mut state_request = GUI_EVENT_LOOP_STATE_REQUEST.lock().unwrap();
                 if *state_request == RequestedGuiEventLoopState::StartLoop {
                     *state_request = RequestedGuiEventLoopState::LoopStated;
@@ -99,8 +101,8 @@ pub fn start_ui_event_loop() {
         }
     }
 
-    sixtyfps_rendering_backend_default::backend()
-        .run_event_loop(sixtyfps_corelib::backend::EventLoopQuitBehavior::QuitOnlyExplicitly);
+    i_slint_backend_selector::backend()
+        .run_event_loop(i_slint_core::backend::EventLoopQuitBehavior::QuitOnlyExplicitly);
 }
 
 pub fn quit_ui_event_loop() {
@@ -112,8 +114,8 @@ pub fn quit_ui_event_loop() {
         GUI_EVENT_LOOP_NOTIFIER.notify_one();
     }
 
-    sixtyfps_rendering_backend_default::backend().post_event(Box::new(|| {
-        sixtyfps_rendering_backend_default::backend().quit_event_loop();
+    i_slint_backend_selector::backend().post_event(Box::new(|| {
+        i_slint_backend_selector::backend().quit_event_loop();
     }));
 
     // Make sure then sender channel gets dropped
@@ -200,7 +202,7 @@ async fn reload_preview(
         cache.current = preview_component.clone();
     }
 
-    let mut builder = sixtyfps_interpreter::ComponentCompiler::default();
+    let mut builder = slint_interpreter::ComponentCompiler::default();
     let cli_args = super::Cli::parse();
     if !cli_args.style.is_empty() {
         builder.set_style(cli_args.style)
@@ -227,7 +229,7 @@ async fn reload_preview(
     if let Some(compiled) = compiled {
         #[derive(Default)]
         struct PreviewState {
-            handle: Option<sixtyfps_interpreter::ComponentInstance>,
+            handle: Option<slint_interpreter::ComponentInstance>,
         }
         thread_local! {static PREVIEW_STATE: std::cell::RefCell<PreviewState> = Default::default();}
         PREVIEW_STATE.with(|preview_state| {
@@ -254,7 +256,7 @@ async fn reload_preview(
 }
 
 fn notify_diagnostics(
-    diagnostics: &[sixtyfps_interpreter::Diagnostic],
+    diagnostics: &[slint_interpreter::Diagnostic],
     sender: &crossbeam_channel::Sender<Message>,
 ) -> Option<()> {
     let mut lsp_diags: HashMap<lsp_types::Url, Vec<lsp_types::Diagnostic>> = Default::default();

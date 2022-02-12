@@ -1,5 +1,5 @@
-// Copyright © SixtyFPS GmbH <info@sixtyfps.io>
-// SPDX-License-Identifier: (GPL-3.0-only OR LicenseRef-SixtyFPS-commercial)
+// Copyright © SixtyFPS GmbH <info@slint-ui.com>
+// SPDX-License-Identifier: GPL-3.0-only OR LicenseRef-Slint-commercial
 
 use std::io::Write;
 use std::path::Path;
@@ -27,7 +27,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let file = file.replace('\r', ""); // Remove \r, because Windows.
         let mut rest = file.as_str();
         let mut count = 0;
-        const BEGIN_MARKER: &str = "\n```60\n";
+        const BEGIN_MARKER: &str = "\n```slint\n";
         while let Some(begin) = rest.find(BEGIN_MARKER) {
             rest = rest[begin..].strip_prefix(BEGIN_MARKER).unwrap();
             let end = rest.find("\n```\n").ok_or_else(|| {

@@ -1,8 +1,0 @@
-// Copyright © SixtyFPS GmbH <info@sixtyfps.io>
-// SPDX-License-Identifier: (GPL-3.0-only OR LicenseRef-SixtyFPS-commercial)
-
-export MainWindow := Window {
-    property <int> some_prop: 42;
-}
-
-export { MainWindow as Main-Window }

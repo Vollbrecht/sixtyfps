@@ -1,7 +1,7 @@
 # Contributing
 
-We warmly welcome contributions to the project. Let's discuss ideas or questions in [Github discussions](https://github.com/sixtyfpsui/sixtyfps/discussions).
-Please feel welcome to open github issues, pull requests or comment for example on [RFC tagged](https://github.com/sixtyfpsui/sixtyfps/labels/rfc) issues.
+We warmly welcome contributions to the project. Let's discuss ideas or questions in [Github discussions](https://github.com/slint-ui/slint/discussions).
+Please feel welcome to open github issues, pull requests or comment for example on [RFC tagged](https://github.com/slint-ui/slint/labels/rfc) issues.
 
 ## Coding Style
 
@@ -26,6 +26,6 @@ All changes submitted to the repository are automatically built and tested via G
 
 ## Contributor License Agreement
 
-When opening a pull request, you will be asked to sign a [Contributor License Agreement (CLA)](https://cla-assistant.io/sixtyfpsui/sixtyfps) which
+When opening a pull request, you will be asked to sign a [Contributor License Agreement (CLA)](https://cla-assistant.io/slint-ui/slint) which
 will allow us to relicense your contribution.
 Please contact us for any concerns.

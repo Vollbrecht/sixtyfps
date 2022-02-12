@@ -1,11 +1,11 @@
-# Copyright © SixtyFPS GmbH <info@sixtyfps.io>
-# SPDX-License-Identifier: (GPL-3.0-only OR LicenseRef-SixtyFPS-commercial)
+# Copyright © SixtyFPS GmbH <info@slint-ui.com>
+# SPDX-License-Identifier: GPL-3.0-only OR LicenseRef-Slint-commercial
 
 cmake_minimum_required(VERSION 3.14)
 project(qt_viewer LANGUAGES CXX)
 
-if (NOT TARGET SixtyFPS::SixtyFPS)
-    find_package(SixtyFPS REQUIRED)
+if (NOT TARGET Slint::Slint)
+    find_package(Slint REQUIRED)
 endif()
 
 find_package(Qt6 6.0 COMPONENTS Core Widgets QUIET)
@@ -16,5 +16,5 @@ endif()
 if (TARGET Qt::Widgets)
     set(CMAKE_AUTOUIC ON)
     add_executable(qt_viewer qt_viewer.cpp)
-    target_link_libraries(qt_viewer PRIVATE SixtyFPS::SixtyFPS Qt::Core Qt::Widgets)
+    target_link_libraries(qt_viewer PRIVATE Slint::Slint Qt::Core Qt::Widgets)
 endif()

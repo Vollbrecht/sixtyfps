@@ -1,3 +1,6 @@
+// Copyright © SixtyFPS GmbH <info@slint-ui.com>
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 /*!
 This crate expose the [`FieldOffsets`] derive macro and the types it uses.
 

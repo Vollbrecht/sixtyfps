@@ -1,7 +1,7 @@
 <!DOCTYPE html>
 
-<!-- Copyright © SixtyFPS GmbH <info@sixtyfps.io> -->
-<!-- SPDX-License-Identifier: (GPL-3.0-only OR LicenseRef-SixtyFPS-commercial) -->
+<!-- Copyright © SixtyFPS GmbH <info@slint-ui.com> -->
+<!-- SPDX-License-Identifier: GPL-3.0-only OR LicenseRef-Slint-commercial -->
 
 <html>
 <!--
@@ -13,17 +13,9 @@
 
 <head>
   <meta charset="UTF-8">
-  <title>SixtyFPS UI Printer Demo (Web Assembly version)</title>
+  <title>Slint Printer Demo (Old)</title>
+  <link rel="stylesheet" href="https://slint-ui.com/css/demos-v1.css">
   <style>
-    canvas {
-      box-sizing: border-box;
-    }
-
-    canvas:focus {
-      outline: none;
-      touch-action: none;
-    }
-
     @media screen and (max-width: 992px) and (orientation: landscape) {
       .hide-in-mobile-landscape {
         display: none;
@@ -40,35 +32,24 @@
         height: 100vh !important;
       }
     }
-
-
-    /* beautify ignore:start */
-    .spinner:before {
-      content: ''; box-sizing: border-box; position: absolute;
-      top: 50%; left: 50%; width: 100px; height: 100px;
-      margin-top: -10px; margin-left: -10px;
-      border-radius: 50%;  border: 2px solid transparent;
-      border-top-color: #07d; border-bottom-color: #07d;
-      animation: spinner 1s ease infinite;
-    }
-    @keyframes spinner { to { transform: rotate(360deg); } }
-    /* beautify ignore:end */
   </style>
 </head>
 
 <body>
-  <p class="hide-in-mobile-landscape">This is the <a href="https://sixtyfps.io">SixtyFPS</a> UI Printer Demo compiled to WebAssembly. It simulates the
+  <h1 class="hide-in-mobile-landscape">Old Printer Demo</h1>
+  <p class="hide-in-mobile-landscape">This is the <a href="https://slint-ui.com">Slint</a> Printer Demo compiled to
+    WebAssembly. It simulates the
     touch user interface of
     the advanced "Print Machine 2000", without actually printing anything.</p>
   <div id="spinner" style="position: relative;">
     <div class="spinner">Loading...</div>
   </div>
   <canvas id="canvas" width="640" height="480" unselectable="on"></canvas>
-  <p class="hide-in-mobile-landscape">
-    <a href="https://github.com/sixtyfpsui/sixtyfps/blob/master/examples/printerdemo_old/ui/printerdemo.60">
+  <p class="hide-in-mobile-landscape links">
+    <a href="https://github.com/slint-ui/slint/blob/master/examples/printerdemo_old/ui/printerdemo.slint">
       View Source Code on GitHub</a> -
     <a
-      href="https://sixtyfps.io/editor?load_url=https://raw.githubusercontent.com/sixtyfpsui/sixtyfps/master/examples/printerdemo_old/ui/printerdemo.60">
+      href="https://slint-ui.com/editor?load_url=https://raw.githubusercontent.com/slint-ui/slint/master/examples/printerdemo_old/ui/printerdemo.slint">
       Edit in the online code editor
     </a>
   </p>

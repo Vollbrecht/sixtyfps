@@ -1,15 +1,15 @@
-// Copyright © SixtyFPS GmbH <info@sixtyfps.io>
-// SPDX-License-Identifier: (GPL-3.0-only OR LicenseRef-SixtyFPS-commercial)
+// Copyright © SixtyFPS GmbH <info@slint-ui.com>
+// SPDX-License-Identifier: GPL-3.0-only OR LicenseRef-Slint-commercial
 
-use sixtyfps::{Model, ModelHandle, Timer, VecModel};
+use slint::{Model, Timer, VecModel};
 use std::rc::Rc;
 use std::time::Duration;
 
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen::prelude::*;
 
-sixtyfps::sixtyfps! {
-    import { MainWindow } from "memory.60";
+slint::slint! {
+    import { MainWindow } from "memory.slint";
 }
 
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen(start))]
@@ -30,7 +30,7 @@ pub fn main() {
 
     let tiles_model = Rc::new(VecModel::from(tiles));
 
-    main_window.set_memory_tiles(ModelHandle::new(tiles_model.clone()));
+    main_window.set_memory_tiles(tiles_model.clone().into());
 
     let main_window_weak = main_window.as_weak();
 

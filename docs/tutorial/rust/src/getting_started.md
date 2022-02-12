@@ -10,21 +10,18 @@ cargo new memory
 cd memory
 ```
 
-Then we edit `Cargo.toml` to add the sixtyfps dependency:
+Then we edit `Cargo.toml` to add the slint dependency:
 
 ```toml
 [package]
 #...
-edition = "2018"
-resolver = "2"
+edition = "2021"
 
 [dependencies]
-sixtyfps = "0.1.5"
+slint = "0.2.0"
 ```
 
-The `resolver = "2"` line is there to avoid some errors because of conflicting dependencies on some platforms.
-
-Finally we copy the hello world program from the [SixtyFPS documentation](https://sixtyfps.io/docs/rust/sixtyfps/) into our `src/main.rs`:
+Finally we copy the hello world program from the [Slint documentation](https://slint-ui.com/docs/rust/slint/) into our `src/main.rs`:
 
 ```rust,noplayground
 {{#include main_initial.rs:main}}
@@ -32,4 +29,4 @@ Finally we copy the hello world program from the [SixtyFPS documentation](https:
 
 We run this example with `cargo run` and a window will appear with the green "Hello World" greeting.
 
-![Screenshot of initial tutorial app showing Hello World](https://sixtyfps.io/blog/memory-game-tutorial/getting-started.png "Hello World")
+![Screenshot of initial tutorial app showing Hello World](https://slint-ui.com/blog/memory-game-tutorial/getting-started.png "Hello World")

@@ -1,12 +1,13 @@
-// Copyright © SixtyFPS GmbH <info@sixtyfps.io>
-// SPDX-License-Identifier: (GPL-3.0-only OR LicenseRef-SixtyFPS-commercial)
+// Copyright © SixtyFPS GmbH <info@slint-ui.com>
+// SPDX-License-Identifier: GPL-3.0-only OR LicenseRef-Slint-commercial
 
 #[allow(dead_code)]
 // ANCHOR: main
 fn main() {
     MainWindow::new().run();
 }
-sixtyfps::sixtyfps! {
+
+slint::slint! {
     MainWindow := Window {
         Text {
             text: "hello world";

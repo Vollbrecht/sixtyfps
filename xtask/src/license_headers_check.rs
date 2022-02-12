@@ -1,5 +1,5 @@
-// Copyright © SixtyFPS GmbH <info@sixtyfps.io>
-// SPDX-License-Identifier: (GPL-3.0-only OR LicenseRef-SixtyFPS-commercial)
+// Copyright © SixtyFPS GmbH <info@slint-ui.com>
+// SPDX-License-Identifier: GPL-3.0-only OR LicenseRef-Slint-commercial
 
 use anyhow::Context;
 use anyhow::Result;
@@ -263,8 +263,8 @@ enum LicenseLocation {
 lazy_static! {
     // cspell:disable
     static ref LICENSE_LOCATION_FOR_FILE: Vec<(regex::Regex, LicenseLocation)> = [
-        ("^helper_crates/const-field-offset/src/lib.rs$", LicenseLocation::NoLicense), // Upstream fork
-        ("^helper_crates/const-field-offset/Cargo.toml$", LicenseLocation::NoLicense), // Upstream fork
+        ("^helper_crates/const-field-offset/.*", LicenseLocation::NoLicense), // liberal license
+        ("^helper_crates/document-features/.*", LicenseLocation::NoLicense), // liberal license
         (".+webpack\\..+\\.js$", LicenseLocation::NoLicense),
         (".+\\.license$", LicenseLocation::NoLicense),
         (".+\\.rs$", LicenseLocation::Tag(LicenseTagStyle::c_style_comment_style())),
@@ -293,10 +293,10 @@ lazy_static! {
         (".+\\.tmPreferences$", LicenseLocation::NoLicense),
         ("\\.clang-format$", LicenseLocation::NoLicense),
         (".+Dockerfile.*$", LicenseLocation::Tag(LicenseTagStyle::shell_comment_style())),
-        ("^api/sixtyfps-cpp/docs/Pipfile$", LicenseLocation::NoLicense),
-        ("^api/sixtyfps-cpp/docs/conf.py$", LicenseLocation::NoLicense),
-        ("^api/sixtyfps-cpp/docs/_static/.+$", LicenseLocation::NoLicense),
-        ("^api/sixtyfps-cpp/docs/_templates/.+$", LicenseLocation::NoLicense),
+        ("^api/cpp/docs/Pipfile$", LicenseLocation::NoLicense),
+        ("^api/cpp/docs/conf.py$", LicenseLocation::NoLicense),
+        ("^api/cpp/docs/_static/.+$", LicenseLocation::NoLicense),
+        ("^api/cpp/docs/_templates/.+$", LicenseLocation::NoLicense),
         ("^docs/tutorial/theme/.+$", LicenseLocation::NoLicense),
         ("\\.cargo/config$", LicenseLocation::Tag(LicenseTagStyle::shell_comment_style())),
         ("^Cargo.toml$", LicenseLocation::NoLicense),
@@ -308,10 +308,13 @@ lazy_static! {
         (".+\\.sh$", LicenseLocation::Tag(LicenseTagStyle::shell_comment_style())),
         (".+\\.60$", LicenseLocation::Tag(LicenseTagStyle::c_style_comment_style())),
         (".+\\.60\\.disabled$", LicenseLocation::Tag(LicenseTagStyle::c_style_comment_style())),
+        (".+\\.slint$", LicenseLocation::Tag(LicenseTagStyle::c_style_comment_style())),
+        (".+\\.slint\\.disabled$", LicenseLocation::Tag(LicenseTagStyle::c_style_comment_style())),
         (".*README$", LicenseLocation::NoLicense),
         ("LICENSE\\..*", LicenseLocation::NoLicense),
-        ("LICENSE-DejaVu", LicenseLocation::NoLicense),
         (".+\\.txt$", LicenseLocation::NoLicense),
+        ("(^|.+)\\.reuse/dep5$", LicenseLocation::NoLicense), // .reuse files have no license headers
+        ("LICENSES/.+", LicenseLocation::NoLicense),
     ]
     .iter()
     .map(|(re, ty)| (regex::Regex::new(re).unwrap(), *ty))
@@ -336,15 +339,15 @@ impl<'a> LicenseHeader<'a> {
     }
 }
 
-const EXPECTED_SPDX_EXPRESSION: &str = "(GPL-3.0-only OR LicenseRef-SixtyFPS-commercial)";
+const EXPECTED_SPDX_EXPRESSION: &str = "GPL-3.0-only OR LicenseRef-Slint-commercial";
 const EXPECTED_SPDX_ID: &str =
     const_format::concatcp!("SP", "DX-License-Identifier: ", EXPECTED_SPDX_EXPRESSION); // Do not confuse the reuse tool
 
 const EXPECTED_HEADER: LicenseHeader<'static> =
-    LicenseHeader(&["Copyright © SixtyFPS GmbH <info@sixtyfps.io>", EXPECTED_SPDX_ID]);
+    LicenseHeader(&["Copyright © SixtyFPS GmbH <info@slint-ui.com>", EXPECTED_SPDX_ID]);
 
-const EXPECTED_HOMEPAGE: &str = "https://sixtyfps.io";
-const EXPECTED_REPOSITORY: &str = "https://github.com/sixtyfpsui/sixtyfps";
+const EXPECTED_HOMEPAGE: &str = "https://slint-ui.com";
+const EXPECTED_REPOSITORY: &str = "https://github.com/slint-ui/slint";
 
 fn collect_files() -> Result<Vec<PathBuf>> {
     let root = super::root_dir();
@@ -579,7 +582,7 @@ impl LicenseHeaderCheck {
             return Err(anyhow::anyhow!("Missing description field"));
         }
 
-        // Check that version of sixtyfps- dependencies are matching this version
+        // Check that version of slint- dependencies are matching this version
         let expected_version = format!(
             "={}",
             doc.package()?.get("version").unwrap().as_value().unwrap().as_str().unwrap()
@@ -590,18 +593,18 @@ impl LicenseHeaderCheck {
             .iter()
             .chain(doc.dependencies("build-dependencies").iter())
         {
-            if dep_name.starts_with("sixtyfps") {
+            if dep_name.starts_with("slint") {
                 match dep {
                     CargoDependency::Simple { .. } => {
                         return Err(anyhow::anyhow!(
-                            "sixtyfps package '{}' outside of the repository?",
+                            "slint package '{}' outside of the repository?",
                             dep_name
                         ))
                     }
                     CargoDependency::Full { path, version } => {
                         if path.is_empty() {
                             return Err(anyhow::anyhow!(
-                                "sixtyfps package '{}' outside of the repository?",
+                                "slint package '{}' outside of the repository?",
                                 dep_name
                             ));
                         }

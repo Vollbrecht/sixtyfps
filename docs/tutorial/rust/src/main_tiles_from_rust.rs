@@ -1,10 +1,10 @@
-// Copyright © SixtyFPS GmbH <info@sixtyfps.io>
-// SPDX-License-Identifier: (GPL-3.0-only OR LicenseRef-SixtyFPS-commercial)
+// Copyright © SixtyFPS GmbH <info@slint-ui.com>
+// SPDX-License-Identifier: GPL-3.0-only OR LicenseRef-Slint-commercial
 
 #[allow(dead_code)]
 // ANCHOR: tiles
 fn main() {
-    use sixtyfps::Model;
+    use slint::Model;
 
     let main_window = MainWindow::new();
 
@@ -19,13 +19,14 @@ fn main() {
     tiles.shuffle(&mut rng);
 
     // Assign the shuffled Vec to the model property
-    let tiles_model = std::rc::Rc::new(sixtyfps::VecModel::from(tiles));
-    main_window.set_memory_tiles(sixtyfps::ModelHandle::new(tiles_model));
+    let tiles_model = std::rc::Rc::new(slint::VecModel::from(tiles));
+    main_window.set_memory_tiles(tiles_model.into());
 
     main_window.run();
 }
+
 // ANCHOR_END: tiles
-sixtyfps::sixtyfps! {
+slint::slint! {
     struct TileData := {
         image: image,
         image_visible: bool,

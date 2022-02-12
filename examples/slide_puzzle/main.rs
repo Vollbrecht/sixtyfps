@@ -1,19 +1,21 @@
-// Copyright © SixtyFPS GmbH <info@sixtyfps.io>
-// SPDX-License-Identifier: (GPL-3.0-only OR LicenseRef-SixtyFPS-commercial)
+// Copyright © SixtyFPS GmbH <info@slint-ui.com>
+// SPDX-License-Identifier: GPL-3.0-only OR LicenseRef-Slint-commercial
 
-use sixtyfps::Model;
+use slint::Model;
 use std::cell::RefCell;
 use std::rc::Rc;
 
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen::prelude::*;
 
-sixtyfps::include_modules!();
+slint::include_modules!();
 
 fn shuffle() -> Vec<i8> {
     fn is_solvable(positions: &[i8]) -> bool {
         // Same source as the flutter's slide_puzzle:
         // https://www.cs.bham.ac.uk/~mdr/teaching/modules04/java2/TilesSolvability.html
+        // This page seems to be no longer available, a copy can be found here:
+        // https://horatiuvlad.com/unitbv/inteligenta_artificiala/2015/TilesSolvability.html
 
         let mut inversions = 0;
         for x in 0..positions.len() - 1 {
@@ -36,13 +38,13 @@ fn shuffle() -> Vec<i8> {
 }
 
 struct AppState {
-    pieces: Rc<sixtyfps::VecModel<Piece>>,
-    main_window: sixtyfps::Weak<MainWindow>,
+    pieces: Rc<slint::VecModel<Piece>>,
+    main_window: slint::Weak<MainWindow>,
     /// An array of 16 values which represent a 4x4 matrix containing the piece number in that
     /// position. -1 is no piece.
     positions: Vec<i8>,
-    auto_play_timer: sixtyfps::Timer,
-    kick_animation_timer: sixtyfps::Timer,
+    auto_play_timer: slint::Timer,
+    kick_animation_timer: slint::Timer,
     /// The speed in the x and y direction for the associated tile
     speed_for_kick_animation: [(f32, f32); 15],
     finished: bool,
@@ -74,7 +76,7 @@ impl AppState {
     }
 
     fn piece_clicked(&mut self, p: i8) -> bool {
-        let piece = self.pieces.row_data(p as usize);
+        let piece = self.pieces.row_data(p as usize).unwrap_or_default();
         assert_eq!(self.positions[(piece.pos_x * 4 + piece.pos_y) as usize], p);
 
         // find the coordinate of the hole.
@@ -148,7 +150,7 @@ impl AppState {
 
         let mut has_animation = false;
         for idx in 0..15 {
-            let mut p = self.pieces.row_data(idx);
+            let mut p = self.pieces.row_data(idx).unwrap_or_default();
             let ax = spring_animation(&mut p.offset_x, &mut self.speed_for_kick_animation[idx].0);
             let ay = spring_animation(&mut p.offset_y, &mut self.speed_for_kick_animation[idx].1);
             if ax || ay {
@@ -171,7 +173,7 @@ pub fn main() {
 
     let main_window = MainWindow::new();
     let state = Rc::new(RefCell::new(AppState {
-        pieces: Rc::new(sixtyfps::VecModel::<Piece>::from(vec![Piece::default(); 15])),
+        pieces: Rc::new(slint::VecModel::<Piece>::from(vec![Piece::default(); 15])),
         main_window: main_window.as_weak(),
         positions: vec![],
         auto_play_timer: Default::default(),
@@ -180,7 +182,7 @@ pub fn main() {
         finished: false,
     }));
     state.borrow_mut().randomize();
-    main_window.set_pieces(sixtyfps::ModelHandle::new(state.borrow().pieces.clone()));
+    main_window.set_pieces(state.borrow().pieces.clone().into());
 
     let state_copy = state.clone();
     main_window.on_piece_clicked(move |p| {
@@ -192,7 +194,7 @@ pub fn main() {
         if !state_copy.borrow_mut().piece_clicked(p as i8) {
             let state_weak = Rc::downgrade(&state_copy);
             state_copy.borrow().kick_animation_timer.start(
-                sixtyfps::TimerMode::Repeated,
+                slint::TimerMode::Repeated,
                 std::time::Duration::from_millis(16),
                 move || {
                     if let Some(state) = state_weak.upgrade() {
@@ -215,7 +217,7 @@ pub fn main() {
         if enabled {
             let state_weak = Rc::downgrade(&state_copy);
             state_copy.borrow().auto_play_timer.start(
-                sixtyfps::TimerMode::Repeated,
+                slint::TimerMode::Repeated,
                 std::time::Duration::from_millis(200),
                 move || {
                     if let Some(state) = state_weak.upgrade() {

@@ -1,17 +1,17 @@
-// Copyright © SixtyFPS GmbH <info@sixtyfps.io>
-// SPDX-License-Identifier: (GPL-3.0-only OR LicenseRef-SixtyFPS-commercial)
+// Copyright © SixtyFPS GmbH <info@slint-ui.com>
+// SPDX-License-Identifier: GPL-3.0-only OR LicenseRef-Slint-commercial
 
-use sixtyfps::SharedString;
+use slint::SharedString;
 use std::rc::Rc;
 
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen::prelude::*;
 
-sixtyfps::sixtyfps! {
-    import { Slider, HorizontalBox, VerticalBox, GroupBox, ComboBox } from "sixtyfps_widgets.60";
+slint::slint! {
+    import { Slider, HorizontalBox, VerticalBox, GroupBox, ComboBox } from "std-widgets.slint";
 
     export MainWindow := Window {
-        title: "SixtyFPS Image Filter Integration Example";
+        title: "Slint Image Filter Integration Example";
         preferred-width: 800px;
         preferred-height: 600px;
 
@@ -57,15 +57,19 @@ struct Filter {
 
 struct Filters(Vec<Filter>);
 
-impl sixtyfps::Model for Filters {
+impl slint::Model for Filters {
     type Data = SharedString;
 
     fn row_count(&self) -> usize {
         self.0.len()
     }
 
-    fn row_data(&self, row: usize) -> Self::Data {
-        self.0[row].name.clone()
+    fn row_data(&self, row: usize) -> Option<Self::Data> {
+        self.0.get(row).map(|x| x.name.clone())
+    }
+
+    fn model_tracker(&self) -> &dyn slint::ModelTracker {
+        &()
     }
 }
 
@@ -79,20 +83,19 @@ pub fn main() {
     let main_window = MainWindow::new();
 
     #[cfg(target_arch = "wasm32")]
-    let source_image =
-        { image::load_from_memory(include_bytes!("cat_preview_round.png")).unwrap().into_rgba8() };
+    let source_image = image::load_from_memory(include_bytes!("cat.jpg")).unwrap().into_rgba8();
     #[cfg(not(target_arch = "wasm32"))]
     let source_image = {
         let mut cat_path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-        cat_path.push("cat_preview_round.png");
+        cat_path.push("cat.jpg");
         image::open(&cat_path).expect("Error loading cat image").into_rgba8()
     };
 
-    main_window.set_original_image(sixtyfps::Image::from_rgba8(
-        sixtyfps::SharedPixelBuffer::clone_from_slice(
+    main_window.set_original_image(slint::Image::from_rgba8(
+        slint::SharedPixelBuffer::clone_from_slice(
             source_image.as_raw(),
-            source_image.width() as _,
-            source_image.height() as _,
+            source_image.width(),
+            source_image.height(),
         ),
     ));
 
@@ -136,15 +139,15 @@ pub fn main() {
     ]);
     let filters = Rc::new(filters);
 
-    main_window.set_filters(sixtyfps::ModelHandle::new(filters.clone()));
+    main_window.set_filters(slint::ModelRc::from(filters.clone()));
 
     main_window.on_filter_image(move |filter_index| {
         let filter_fn = filters.0[filter_index as usize].apply_function;
         let filtered_image = filter_fn(&source_image);
-        sixtyfps::Image::from_rgba8(sixtyfps::SharedPixelBuffer::clone_from_slice(
+        slint::Image::from_rgba8(slint::SharedPixelBuffer::clone_from_slice(
             filtered_image.as_raw(),
-            filtered_image.width() as _,
-            filtered_image.height() as _,
+            filtered_image.width(),
+            filtered_image.height(),
         ))
     });
 

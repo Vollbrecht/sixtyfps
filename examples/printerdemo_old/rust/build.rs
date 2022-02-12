@@ -1,6 +1,6 @@
-// Copyright © SixtyFPS GmbH <info@sixtyfps.io>
-// SPDX-License-Identifier: (GPL-3.0-only OR LicenseRef-SixtyFPS-commercial)
+// Copyright © SixtyFPS GmbH <info@slint-ui.com>
+// SPDX-License-Identifier: GPL-3.0-only OR LicenseRef-Slint-commercial
 
 fn main() {
-    sixtyfps_build::compile("../ui/printerdemo.60").unwrap();
+    slint_build::compile("../ui/printerdemo.slint").unwrap();
 }

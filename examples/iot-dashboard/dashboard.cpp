@@ -1,26 +1,25 @@
-// Copyright © SixtyFPS GmbH <info@sixtyfps.io>
-// SPDX-License-Identifier: (GPL-3.0-only OR LicenseRef-SixtyFPS-commercial)
+// Copyright © SixtyFPS GmbH <info@slint-ui.com>
+// SPDX-License-Identifier: GPL-3.0-only OR LicenseRef-Slint-commercial
 
 #include "dashboard.h"
 
 #include <fmt/core.h>
 
-void Widget::set_property(std::string_view name, const sixtyfps::interpreter::Value &value)
+void Widget::set_property(std::string_view name, const slint::interpreter::Value &value)
 {
     if (m_ui)
         (*m_ui)->set_property(qualified_property_name(name), value);
 }
 
-std::optional<sixtyfps::interpreter::Value> Widget::property(std::string_view name) const
+std::optional<slint::interpreter::Value> Widget::property(std::string_view name) const
 {
     if (m_ui)
         return (*m_ui)->get_property(qualified_property_name(name));
     return {};
 }
 
-void Widget::connect_ui(
-        const sixtyfps::ComponentHandle<sixtyfps::interpreter::ComponentInstance> &ui,
-        std::string_view properties_prefix)
+void Widget::connect_ui(const slint::ComponentHandle<slint::interpreter::ComponentInstance> &ui,
+                        std::string_view properties_prefix)
 {
     m_ui = ui;
     m_properties_prefix = properties_prefix;
@@ -44,9 +43,9 @@ std::string WidgetLocation::location_bindings() const
     };
 
     return fmt::format(
-            R"60(row: {};
+            R"slint(row: {};
                col: {};
-{}{})60",
+{}{})slint",
             row, column, maybe_binding("rowspan", row_span), maybe_binding("colspan", col_span));
 }
 
@@ -73,8 +72,8 @@ int DashboardBuilder::register_widget(WidgetPtr widget)
     return widget_id;
 }
 
-std::optional<sixtyfps::ComponentHandle<sixtyfps::interpreter::ComponentInstance>>
-DashboardBuilder::build(sixtyfps::interpreter::ComponentCompiler &compiler) const
+std::optional<slint::ComponentHandle<slint::interpreter::ComponentInstance>>
+DashboardBuilder::build(slint::interpreter::ComponentCompiler &compiler) const
 {
     std::string widget_imports;
 
@@ -86,7 +85,8 @@ DashboardBuilder::build(sixtyfps::interpreter::ComponentCompiler &compiler) cons
     }
 
     if (widget_imports.size() > 0) {
-        widget_imports = fmt::format("import {{ {} }} from \"iot-dashboard.60\";", widget_imports);
+        widget_imports =
+                fmt::format("import {{ {} }} from \"iot-dashboard.slint\";", widget_imports);
     }
 
     // Vector of name/type_name of properties forwarded through the MainContent {} element.
@@ -99,11 +99,11 @@ DashboardBuilder::build(sixtyfps::interpreter::ComponentCompiler &compiler) cons
         const auto &[widget_name, widget_ptr] = widgets[widget_id];
 
         main_grid.append(fmt::format(
-                R"60(
+                R"slint(
             {0} := {1} {{
                 {2}
             }}
-        )60",
+        )slint",
                 widget_name, widget_ptr->type_name(), location.location_bindings()));
 
         std::string properties_prefix = widget_name;
@@ -126,10 +126,10 @@ DashboardBuilder::build(sixtyfps::interpreter::ComponentCompiler &compiler) cons
         const auto &[widget_name, widget_ptr] = widgets[widget_id];
 
         top_bar.append(fmt::format(
-                R"60(
+                R"slint(
             {0} := {1} {{
             }}
-        )60",
+        )slint",
                 widget_name, widget_ptr->type_name()));
 
         std::string properties_prefix = widget_name;
@@ -146,7 +146,7 @@ DashboardBuilder::build(sixtyfps::interpreter::ComponentCompiler &compiler) cons
     }
 
     auto source_code = fmt::format(
-            R"60(
+            R"slint(
 
 {0}
 
@@ -183,15 +183,14 @@ MainWindow := Window {{
         }}
     }}
 }}
-)60",
+)slint",
             widget_imports, top_bar, main_grid, exposed_properties, main_content_properties);
 
     auto definition = compiler.build_from_source(source_code, SOURCE_DIR);
 
     for (auto diagnostic : compiler.diagnostics()) {
-        std::cerr << (diagnostic.level == sixtyfps::interpreter::DiagnosticLevel::Warning
-                              ? "warning: "
-                              : "error: ")
+        std::cerr << (diagnostic.level == slint::interpreter::DiagnosticLevel::Warning ? "warning: "
+                                                                                       : "error: ")
                   << diagnostic.message << std::endl;
         std::cerr << "location: " << diagnostic.source_file;
         if (diagnostic.line > 0)

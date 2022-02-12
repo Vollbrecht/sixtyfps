@@ -1,5 +1,5 @@
-# Copyright © SixtyFPS GmbH <info@sixtyfps.io>
-# SPDX-License-Identifier: (GPL-3.0-only OR LicenseRef-SixtyFPS-commercial)
+# Copyright © SixtyFPS GmbH <info@slint-ui.com>
+# SPDX-License-Identifier: GPL-3.0-only OR LicenseRef-Slint-commercial
 
 name: Embedded Build
 
@@ -16,8 +16,8 @@ jobs:
           - aarch64-unknown-linux-gnu
           - riscv64gc-unknown-linux-gnu
     env:
-      SIXTYFPS_NO_QT: 1
-      SIXTYFPS_STYLE: fluent
+      SLINT_NO_QT: 1
+      SLINT_STYLE: fluent
     steps:
     - uses: actions/checkout@v2
     - name: Set up Docker Buildx
@@ -34,7 +34,7 @@ jobs:
         context: .
         file: ./docker/Dockerfile.${{ matrix.target }}
         push: true
-        tags: ghcr.io/sixtyfpsui/sixtyfps/${{matrix.target}}:latest
+        tags: ghcr.io/slint-ui/slint/${{matrix.target}}:latest
 
   build:
     needs: [build_containers]
@@ -58,7 +58,7 @@ jobs:
       with:
           use-cross: true
           command: build
-          args: --release --target=${{ matrix.target }} --workspace --exclude sixtyfps-node
+          args: --release --target=${{ matrix.target }} --workspace --exclude slint-node
     - name: "Upload printerdemo artifact"
       uses: actions/upload-artifact@v2
       with:

@@ -1,10 +1,10 @@
-// Copyright © SixtyFPS GmbH <info@sixtyfps.io>
-// SPDX-License-Identifier: (GPL-3.0-only OR LicenseRef-SixtyFPS-commercial)
+// Copyright © SixtyFPS GmbH <info@slint-ui.com>
+// SPDX-License-Identifier: GPL-3.0-only OR LicenseRef-Slint-commercial
 
 use chrono::NaiveDate;
-use sixtyfps::SharedString;
+use slint::SharedString;
 
-sixtyfps::sixtyfps!(import { Booker } from "booker.60";);
+slint::slint!(import { Booker } from "booker.slint";);
 
 pub fn main() {
     let booker = Booker::new();

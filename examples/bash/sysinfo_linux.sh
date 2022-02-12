@@ -1,6 +1,6 @@
 #!/bin/bash -e
-# Copyright © SixtyFPS GmbH <info@sixtyfps.io>
-# SPDX-License-Identifier: (GPL-3.0-only OR LicenseRef-SixtyFPS-commercial)
+# Copyright © SixtyFPS GmbH <info@slint-ui.com>
+# SPDX-License-Identifier: GPL-3.0-only OR LicenseRef-Slint-commercial
 
 if command lsb_release 2>/dev/null >/dev/null; then
    os_name=`lsb_release -ds | tr -d '"\\\\'`
@@ -19,7 +19,7 @@ swap_total_kb=`sed -n -e "s,SwapTotal:\s\+\(.*\)\s\+.\+,\1,p"< /proc/meminfo`
 swap_free_kb=`sed -n -e "s,SwapFree:\s\+\(.*\)\s\+.\+,\1,p"< /proc/meminfo`
 swap_used_kb=$((swap_total_kb - swap_free_kb))
 
-sixtyfps-viewer `dirname $0`/sysinfo.60 --load-data - <<EOT
+slint-viewer `dirname $0`/sysinfo.slint --load-data - <<EOT
 {
     "os_name": "$os_name",
     "uptime": "$uptime",

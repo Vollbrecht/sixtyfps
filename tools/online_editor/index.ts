@@ -1,7 +1,7 @@
-// Copyright © SixtyFPS GmbH <info@sixtyfps.io>
-// SPDX-License-Identifier: (GPL-3.0-only OR LicenseRef-SixtyFPS-commercial)
+// Copyright © SixtyFPS GmbH <info@slint-ui.com>
+// SPDX-License-Identifier: GPL-3.0-only OR LicenseRef-Slint-commercial
 
-import { sixtyfps_language } from "./highlighting";
+import { slint_language } from "./highlighting";
 
 import 'monaco-editor/esm/vs/editor/editor.all.js';
 import 'monaco-editor/esm/vs/editor/standalone/browser/accessibilityHelp/accessibilityHelp.js';
@@ -24,20 +24,20 @@ self.MonacoEnvironment = {
     }
 };
 
-import sixtyfps_init, * as sixtyfps from "../../../wasm-interpreter/sixtyfps_wasm_interpreter.js";
+import slint_init, * as slint from "../../../wasm-interpreter/slint_wasm_interpreter.js";
 
 
 (async function () {
-    await sixtyfps_init();
+    await slint_init();
 
     monaco.languages.register({
-        id: 'sixtyfps'
+        id: 'slint'
     });
-    monaco.languages.onLanguage('sixtyfps', () => {
-        monaco.languages.setMonarchTokensProvider('sixtyfps', sixtyfps_language);
+    monaco.languages.onLanguage('slint', () => {
+        monaco.languages.setMonarchTokensProvider('slint', slint_language);
     });
     var editor = monaco.editor.create(document.getElementById("editor"), {
-        language: 'sixtyfps'
+        language: 'slint'
     });
     var base_url = "";
 
@@ -50,7 +50,7 @@ import sixtyfps_init, * as sixtyfps from "../../../wasm-interpreter/sixtyfps_was
     var editor_documents: Map<string, ModelAndViewState> = new Map;
 
     let hello_world = `
-import { SpinBox, Button, CheckBox, Slider, GroupBox } from "sixtyfps_widgets.60";
+import { SpinBox, Button, CheckBox, Slider, GroupBox } from "std-widgets.slint";
 export Demo := Window {
     width:  300px;   // Width in logical pixels. All 'px' units are automatically scaled with screen resolution.
     height: 300px;
@@ -60,7 +60,7 @@ export Demo := Window {
     }
     Image {
         y: 50px;
-        source: @image-url("https://sixtyfps.io/resources/logo_scaled.png");
+        source: @image-url("https://slint-ui.com/logo/slint-logo-full-light.svg");
     }
 }
 `
@@ -84,7 +84,7 @@ export Demo := Window {
             if (found = window.location.pathname.match(/releases\/([^\/]*)\/editor/)) {
                 tag = "v" + found[1];
             }
-            load_from_url(`https://raw.githubusercontent.com/sixtyfpsui/sixtyfps/${tag}/${select.value}`);
+            load_from_url(`https://raw.githubusercontent.com/slint-ui/slint/${tag}/${select.value}`);
         } else {
             clearTabs();
             base_url = "";
@@ -111,7 +111,7 @@ export Demo := Window {
 
     function tabTitleFromURL(url: string): string {
         if (url === "") {
-            return "unnamed.60";
+            return "unnamed.slint";
         }
         try {
             let parsed_url = new URL(url);
@@ -132,7 +132,7 @@ export Demo := Window {
     }
 
     function createMainModel(source: string, url: string): monaco.editor.ITextModel {
-        let model = monaco.editor.createModel(source, "sixtyfps");
+        let model = monaco.editor.createModel(source, "slint");
         model.onDidChangeContent(function () {
             let permalink = (<HTMLAnchorElement>document.getElementById("permalink"));
             let params = new URLSearchParams();
@@ -216,12 +216,12 @@ export Demo := Window {
         div.innerHTML = "";
         div.appendChild(canvas);
         var markers = [];
-        let { component, diagnostics, error_string } = await sixtyfps.compile_from_string_with_style(source, base_url, style_combo.value, async (url: string): Promise<string> => {
+        let { component, diagnostics, error_string } = await slint.compile_from_string_with_style(source, base_url, style_combo.value, async (url: string): Promise<string> => {
             let model_and_state = editor_documents.get(url);
             if (model_and_state === undefined) {
                 const response = await fetch(url);
                 let doc = await response.text();
-                let model = monaco.editor.createModel(doc, "sixtyfps");
+                let model = monaco.editor.createModel(doc, "slint");
                 model.onDidChangeContent(function () {
                     maybe_update_preview_automatically();
                 });
@@ -251,7 +251,7 @@ export Demo := Window {
                 endColumn: -1,
             }
         });
-        monaco.editor.setModelMarkers(editor.getModel(), "sixtyfps", markers);
+        monaco.editor.setModelMarkers(editor.getModel(), "slint", markers);
 
         if (component !== undefined) {
             component.run(canvas_id)

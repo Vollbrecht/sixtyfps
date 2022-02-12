@@ -3,39 +3,79 @@ All notable changes to this project will be documented in this file.
 
 ## Unreleased
 
+## [0.2.0] - 2022-02-10
+
+This version changes some APIs in incompatible ways. For details how to migrate your application code, see the [C++ migration guide](api/cpp/docs/cpp_migration.md)
+as well as the [Rust migration guide for the `sixtyfps` crate](api/rs/slint/migration.md) and for the
+[`slint-interpreter` crate](internal/interpreter/migration.rs).
+
 ### Changed
 
- - **Breaking:** The internal key code for the keys left, right, home and end
-   has changed. This was undocumented, but if one was handling this in the
-   `FocusScope` event, these keys will now be ignored. Use the `Keys.LeftArrow`
-   and other code exposed in the `Keys` namespace instead
- - For `sixtyfps::Timer` (C++ and Rust), it's now possible to call `restart()` after
-   a timer has been stopped previously by calling `stop()`.
+ - Minimum rust version is now 1.56
+ - C++ compiler requires C++20
+ - In the C++ interpreter API `std::span` is used for callbacks arguments, instead of `sixtyfps::Slice`
+ - `Model::row_data` will now return a `Option<T>` / `std::optional<T>` instead of a plain `T`.
+ - `Model::model_tracker` no longer has a default implementation.
+ - The deprecated methods `Model::attach_peer` and `ModelNotify::attach` were removed.
+ - The interpreter does not differentiate anymore between `Value::Array` and `Value::Model`
+   everything is a `Value::Model`, which now contains a `ModelRc`
+ - In Rust, `slint::SharedPixelBuffer` and `slint::SharedImageBuffer` now use a `u32` instead of `usize` for `width`, `height` and `stride`.
+ - In Rust and C++, `slint::Image::size()` now returns an integer size type.
+ - `sixtyfps::interpreter::CallCallbackError` was renamed to `slint::interpreter::InvokeCallbackError`
+ - Some deprecation warning in .60 became hard errors
+ - Replace `ModelHandle` with `ModelRc`
+ - `slint::interpreter::ComponentInstance` in Rust now implements `slint::ComponentHandle`. This removes `sixtyfps_interpreter::WeakComponentInstance` in favor
+   of `slint_interpreter::Weak<slint_interpreter::ComponentInstance>`.
+ - For the Rust API crate, the Rust Interpreter API crate, the `backend-gl`, `x11`, and `wayland` features were renamed to `backend-gl-all`, `backend-gl-x11`, and `backend-gl-wayland`.
+ - For the C++ CMake interface, the `SIXTYFPS_BACKEND_GL`, `SIXTYFPS_FEATURE_X11`, and `SIXTYFPS_FEATURE_WAYLAND` options were renamed to `SLINT_BACKEND_GL_ALL`, `SLINT_FEATURE_BACKEND_GL_X11`, and `SLINT_FEATURE_BACKEND_GL_WAYLAND`.
+ - The animation `loop-count` property was replaced by `iteration-count` (which is the same as `loop-count` plus one)
 
 ### Added
 
- - Colors names can now be accessed through the `Colors` namespace
- - Math function are now available through the `Math` namespace
- - `TouchArea` gained a `mouse-cursor` property to change the mouse cursor
- - C++: Added version macros
- - Optimize some property access by doing more constant propagation
+ - `TextEdit::font-size` and `LineEdit::font-size` have been added to control the size of these widgets.
+ - Added `slint::Window::set_rendering_notifier` to get a callback before and after a new frame is being rendered.
+ - Added `slint::Window::request_redraw()` to schedule redrawing of the window contents.
+
+### Fixed
+
+ - Models initialized from arrays are now also mutable when run in the interpreter.
+ - Fixed compilation error when accessing object members of array through the array index syntax
+
+## [0.1.6] - 2022-01-21
+
+### Changed
+
+ - **Breaking:** The internal key code for the keys left, right, home and end
+   has changed. This was undocumented, but if you were handling this in the
+   `FocusScope` event, these keys will now be ignored. Use the `Keys.LeftArrow`
+   and other code exposed in the `Keys` namespace instead.
+ - For `sixtyfps::Timer` (C++ and Rust), it's now possible to call `restart()` after
+   a timer has been stopped previously by calling `stop()`.
+ - Property access in `.60` was optimized by doing more constant propagation.
+
+### Added
+
+ - Color names can now be accessed through the `Colors` namespace (in `.60`).
+ - Math function are now available through the `Math` namespace (in `.60`).
+ - `TouchArea` gained a `mouse-cursor` property to change the mouse cursor.
+ - C++: Added `SIXTYFPS_VERSION_MAJOR`/`SIXTYFPS_VERSION_MINOR`/`SIXTYFPS_VERSION_PATCH` version macros.
  - More special keyboard key codes are provided in the `FocusScope`, and
    special keys are handled
  - `start()`, `stop()`, `running()` and a default constructor for C++ `sixtyfps::Timer`
- - Math functions `log`, and `pow`
+ - Added math functions `log`, and `pow`.
  - Property animations now have a `delay` property, which will delay the start
-   of the animation.
+   of the animation. Use this to create sequential animations.
  - Rust: Added `sixtyfps::VecModel::insert(&self, index, value)`.
  - C++: Added `sixtyfps::VecModel::insert(index, value)`.
  - Added ability to access elements of a model with the `[index]` syntax.
 
 ### Fixed
 
- - Memory leak in C++
- - Properly change all the colors when switching dark mode on or of (#687)
+ - Memory leak in C++.
+ - Native style: Colors are updated automatically when the Windowing system switches to and from dark mode (#687)
  - Ctrl/Command+X in text fields copies the selected text to the clipboard and deletes it (cut).
- - Improved native ComboBox look
- - panics or compilation error when using two way bindings on global properties
+ - Improved native ComboBox look.
+ - Fixed panics or compilation error when using two way bindings on global properties.
 
 ## [0.1.5] - 2021-11-24
 
@@ -85,8 +125,8 @@ All notable changes to this project will be documented in this file.
 ### Added
 
  - New `no-frame` property of a `Window` which changes it to borderless/frameless
- - sixtyfps-compiler and sixtyfps-viewer can read the .60 file content from stdin by passing `-`
- - sixtyfps-viewer gained ability to read or save the property values to a json file with `--save-data` and `--load-data`
+ - sixtyfps-compiler and slint-viewer can read the .60 file content from stdin by passing `-`
+ - slint-viewer gained ability to read or save the property values to a json file with `--save-data` and `--load-data`
  - New `StandardButton` widget
  - New `Dialog` element
  - `sixtyfps::Image` has now a `path()` accessor function in Rust and C++ to access the optional path
@@ -180,7 +220,7 @@ All notable changes to this project will be documented in this file.
    and `preferred-height` property can be used to set the initial size and the window remains resizable
    by the user, if the window manager permits.
  - Binding loops are now detected at compile-time instead of panic at runtime.
- - The `viewer` binary was renamed to `sixtyfps-viewer` and is now available via `cargo install` from crates.io.
+ - The `viewer` binary was renamed to `slint-viewer` and is now available via `cargo install` from crates.io.
  - The layout properties `minimum-width`, `maximum-height`, etc. were renamed to a shorter version `min-width`,
    `max-height`. The old names are still supported as a deprecated alias.
 
@@ -334,15 +374,17 @@ All notable changes to this project will be documented in this file.
 ## [0.0.1] - 2020-10-13
  - Initial release.
 
-[0.0.1]: https://github.com/sixtyfpsui/sixtyfps/releases/tag/v0.0.1
-[0.0.2]: https://github.com/sixtyfpsui/sixtyfps/releases/tag/v0.0.2
-[0.0.3]: https://github.com/sixtyfpsui/sixtyfps/releases/tag/v0.0.3
-[0.0.4]: https://github.com/sixtyfpsui/sixtyfps/releases/tag/v0.0.4
-[0.0.5]: https://github.com/sixtyfpsui/sixtyfps/releases/tag/v0.0.5
-[0.0.6]: https://github.com/sixtyfpsui/sixtyfps/releases/tag/v0.0.6
-[0.1.0]: https://github.com/sixtyfpsui/sixtyfps/releases/tag/v0.1.0
-[0.1.1]: https://github.com/sixtyfpsui/sixtyfps/releases/tag/v0.1.1
-[0.1.2]: https://github.com/sixtyfpsui/sixtyfps/releases/tag/v0.1.2
-[0.1.3]: https://github.com/sixtyfpsui/sixtyfps/releases/tag/v0.1.3
-[0.1.4]: https://github.com/sixtyfpsui/sixtyfps/releases/tag/v0.1.4
-[0.1.5]: https://github.com/sixtyfpsui/sixtyfps/releases/tag/v0.1.5
+[0.0.1]: https://github.com/slint-ui/slint/releases/tag/v0.0.1
+[0.0.2]: https://github.com/slint-ui/slint/releases/tag/v0.0.2
+[0.0.3]: https://github.com/slint-ui/slint/releases/tag/v0.0.3
+[0.0.4]: https://github.com/slint-ui/slint/releases/tag/v0.0.4
+[0.0.5]: https://github.com/slint-ui/slint/releases/tag/v0.0.5
+[0.0.6]: https://github.com/slint-ui/slint/releases/tag/v0.0.6
+[0.1.0]: https://github.com/slint-ui/slint/releases/tag/v0.1.0
+[0.1.1]: https://github.com/slint-ui/slint/releases/tag/v0.1.1
+[0.1.2]: https://github.com/slint-ui/slint/releases/tag/v0.1.2
+[0.1.3]: https://github.com/slint-ui/slint/releases/tag/v0.1.3
+[0.1.4]: https://github.com/slint-ui/slint/releases/tag/v0.1.4
+[0.1.5]: https://github.com/slint-ui/slint/releases/tag/v0.1.5
+[0.1.6]: https://github.com/slint-ui/slint/releases/tag/v0.1.6
+[0.2.0]: https://github.com/slint-ui/slint/releases/tag/v0.0.2

@@ -1,12 +1,12 @@
-# Copyright © SixtyFPS GmbH <info@sixtyfps.io>
-# SPDX-License-Identifier: (GPL-3.0-only OR LicenseRef-SixtyFPS-commercial)
+# Copyright © SixtyFPS GmbH <info@slint-ui.com>
+# SPDX-License-Identifier: GPL-3.0-only OR LicenseRef-Slint-commercial
 
 [package]
 name = "test-driver-rust"
-version = "0.1.6"
-authors = ["SixtyFPS <info@sixtyfps.io>"]
-edition = "2018"
-license = "(GPL-3.0-only OR LicenseRef-SixtyFPS-commercial)"
+version = "0.2.1"
+authors = ["Slint Developers <info@slint-ui.com>"]
+edition = "2021"
+license = "GPL-3.0-only OR LicenseRef-Slint-commercial"
 publish = false
 
 [[bin]]
@@ -14,13 +14,14 @@ path = "main.rs"
 name = "test-driver-rust"
 
 [features]
-build-time = ["sixtyfps-compilerlib", "spin_on"]
+build-time = ["i-slint-compiler", "spin_on"]
 
 [dependencies]
-sixtyfps = { path = "../../../api/sixtyfps-rs" }
-sixtyfps-rendering-backend-testing = { path = "../../../sixtyfps_runtime/rendering_backends/testing" }
+slint = { path = "../../../api/rs/slint" }
+i-slint-backend-testing = { path = "../../../internal/backends/testing" }
 
 [build-dependencies]
-test_driver_lib = { path = "../driverlib" }
-sixtyfps-compilerlib = { path = "../../../sixtyfps_compiler", features = ["rust", "display-diagnostics"], optional = true }
+i-slint-compiler = { path = "../../../internal/compiler", features = ["rust", "display-diagnostics"], optional = true }
+
 spin_on = { version = "0.1", optional = true}
+test_driver_lib = { path = "../driverlib" }

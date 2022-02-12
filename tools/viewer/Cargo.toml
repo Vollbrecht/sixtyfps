@@ -1,38 +1,41 @@
-# Copyright © SixtyFPS GmbH <info@sixtyfps.io>
-# SPDX-License-Identifier: (GPL-3.0-only OR LicenseRef-SixtyFPS-commercial)
+# Copyright © SixtyFPS GmbH <info@slint-ui.com>
+# SPDX-License-Identifier: GPL-3.0-only OR LicenseRef-Slint-commercial
 
 [package]
-name = "sixtyfps-viewer"
-version = "0.1.6"
-authors = ["SixtyFPS <info@sixtyfps.io>"]
-edition = "2018"
-license = "(GPL-3.0-only OR LicenseRef-SixtyFPS-commercial)"
-description = "Viewer binary for SixtyFPS"
-repository = "https://github.com/sixtyfpsui/sixtyfps"
-homepage = "https://sixtyfps.io"
+name = "slint-viewer"
+version = "0.2.1"
+authors = ["Slint Developers <info@slint-ui.com>"]
+edition = "2021"
+license = "GPL-3.0-only OR LicenseRef-Slint-commercial"
+description = "Viewer binary for Slint"
+repository = "https://github.com/slint-ui/slint"
+homepage = "https://slint-ui.com"
 categories = ["gui", "development-tools"]
 keywords = ["viewer", "gui", "ui", "toolkit"]
 
 [features]
-sixtyfps-backend-qt = ["sixtyfps-interpreter/backend-qt"]
-sixtyfps-backend-gl = ["sixtyfps-interpreter/backend-gl"]
-x11 = ["sixtyfps-interpreter/x11"]
-wayland = ["sixtyfps-interpreter/wayland"]
-default = ["sixtyfps-backend-qt", "sixtyfps-backend-gl", "x11"]
+backend-qt = ["slint-interpreter/backend-qt"]
+backend-gl-all = ["slint-interpreter/backend-gl-all"]
+backend-gl-wayland = ["slint-interpreter/backend-gl-wayland"]
+backend-gl-x11 = ["slint-interpreter/backend-gl-x11"]
+
+default = ["backend-qt", "backend-gl-all"]
 
 [dependencies]
-sixtyfps-corelib = { version = "=0.1.6", path="../../sixtyfps_runtime/corelib" }
-sixtyfps-rendering-backend-default = { version = "=0.1.6", path="../../sixtyfps_runtime/rendering_backends/default" }
-sixtyfps-interpreter = { version = "=0.1.6", path = "../../sixtyfps_runtime/interpreter", default-features = false, features = ["display-diagnostics"] }
+i-slint-core = { version = "=0.2.1", path="../../internal/core" }
+slint-interpreter = { version = "=0.2.1", path = "../../internal/interpreter", default-features = false, features = ["display-diagnostics", "compat-0-2-0"] }
+i-slint-backend-selector = { version = "=0.2.1", path="../../internal/backends/selector" }
+
 vtable = { version = "0.1", path="../../helper_crates/vtable" }
+
 clap = { version = "3.0.5", features=["derive", "wrap_help"] }
-codemap-diagnostic = "0.1.1"
 codemap = "0.1"
-spin_on = "0.1"
+codemap-diagnostic = "0.1.1"
 notify = "4.0.15"
 serde_json = "1"
 shlex = "1"
+spin_on = "0.1"
 
 [[bin]]
-name = "sixtyfps-viewer"
+name = "slint-viewer"
 path = "main.rs"

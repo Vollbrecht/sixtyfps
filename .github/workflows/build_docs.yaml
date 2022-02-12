@@ -1,5 +1,5 @@
-# Copyright © SixtyFPS GmbH <info@sixtyfps.io>
-# SPDX-License-Identifier: (GPL-3.0-only OR LicenseRef-SixtyFPS-commercial)
+# Copyright © SixtyFPS GmbH <info@slint-ui.com>
+# SPDX-License-Identifier: GPL-3.0-only OR LicenseRef-Slint-commercial
 
 # Build various demo binaries, c++ packages and documentation and publish them on the website
 name: Build docs
@@ -15,8 +15,8 @@ jobs:
       # allow deprecated warning because we are using nightly and some things might be deprecated in nightly
       # for which the stable alternative is not yet available
       RUSTFLAGS: -D warnings -W deprecated
-      RUSTDOCFLAGS: --html-in-header=/home/runner/work/sixtyfps/sixtyfps/docs/resources/sixtyfps-docs-preview.html --html-in-header=/home/runner/work/sixtyfps/sixtyfps/docs/resources/sixtyfps-docs-highlight.html -D warnings -W deprecated
-      SIXTYFPS_NO_QT: 1
+      RUSTDOCFLAGS: --html-in-header=/home/runner/work/slint/slint/docs/resources/slint-docs-preview.html --html-in-header=/home/runner/work/slint/slint/docs/resources/slint-docs-highlight.html -D warnings -W deprecated
+      SLINT_NO_QT: 1
       CARGO_INCREMENTAL: false
       MDBOOK_VERSION: 0.4.10
       MDBOOK_LINKCHECK_VERSION: 0.7.4
@@ -24,7 +24,7 @@ jobs:
     - uses: actions/checkout@v2
     - name: Set up rgb crate rustdoc link
       run: |
-        rgb_version=`grep 'rgb = '  sixtyfps_runtime/corelib/Cargo.toml | sed 's/^.*"\(.*\)"/\1/'`
+        rgb_version=`grep 'rgb = '  internal/core/Cargo.toml | sed 's/^.*"\(.*\)"/\1/'`
         echo "RUSTDOCFLAGS=$RUSTDOCFLAGS --extern-html-root-url rgb=https://docs.rs/rgb/$rgb_version/ -Z unstable-options" >> $GITHUB_ENV
     - name: Setup Node.js
       uses: actions/setup-node@v1
@@ -62,7 +62,7 @@ jobs:
           ${{ runner.os }}-pipenv-
     - name: Remove docs from cache # Avoid stale docs
       run: |
-          rm -rf target/doc target/cppdocs api/sixtyfps-node/docs
+          rm -rf target/doc target/cppdocs api/node/docs
     - name: Check formatting
       uses: actions-rs/cargo@v1
       with:
@@ -77,7 +77,7 @@ jobs:
       with:
           command: doc
           toolchain: nightly
-          args: -p sixtyfps -p sixtyfps-build -p sixtyfps-interpreter --no-deps --all-features
+          args: -p slint -p slint-build -p slint-interpreter --no-deps --all-features
     - name: "Rust Tutorial Docs"
       run: mdbook build
       working-directory: docs/tutorial/rust
@@ -88,7 +88,7 @@ jobs:
       run: |
           npm install --ignore-scripts
           npm run docs
-      working-directory: api/sixtyfps-node
+      working-directory: api/node
     - name: "Upload Docs Artifacts"
       uses: actions/upload-artifact@v2
       with:
@@ -96,10 +96,9 @@ jobs:
           path: |
               target/doc
               target/cppdocs/html
-              api/sixtyfps-node/docs
+              api/node/docs
               docs/tutorial/rust/book/html
               docs/tutorial/cpp/book/html
     - name: Clean cache # Don't cache docs to avoid them including removed classes being published
       run: |
-          rm -rf target/doc target/cppdocs api/sixtyfps-node/docs docs/tutorial/rust/book docs/tutorial/cpp/book
-
+          rm -rf target/doc target/cppdocs api/node/docs docs/tutorial/rust/book docs/tutorial/cpp/book

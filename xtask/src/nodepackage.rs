@@ -1,5 +1,5 @@
-// Copyright © SixtyFPS GmbH <info@sixtyfps.io>
-// SPDX-License-Identifier: (GPL-3.0-only OR LicenseRef-SixtyFPS-commercial)
+// Copyright © SixtyFPS GmbH <info@slint-ui.com>
+// SPDX-License-Identifier: GPL-3.0-only OR LicenseRef-Slint-commercial
 
 use anyhow::Context;
 use xshell::{cmd, cp, pushd, read_dir, read_file, rm_rf, write_file};
@@ -22,7 +22,7 @@ fn cp_r(src: &std::path::Path, dst: &std::path::Path) -> Result<(), Box<dyn std:
 
 pub fn generate() -> Result<(), Box<dyn std::error::Error>> {
     let root = super::root_dir();
-    let node_dir = root.join("api").join("sixtyfps-node");
+    let node_dir = root.join("api").join("node");
 
     let cargo_toml_path = node_dir.join("native").join("Cargo.toml");
 

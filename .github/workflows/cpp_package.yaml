@@ -1,5 +1,5 @@
-# Copyright © SixtyFPS GmbH <info@sixtyfps.io>
-# SPDX-License-Identifier: (GPL-3.0-only OR LicenseRef-SixtyFPS-commercial)
+# Copyright © SixtyFPS GmbH <info@slint-ui.com>
+# SPDX-License-Identifier: GPL-3.0-only OR LicenseRef-Slint-commercial
 
 name: Build the C++ binary package
 
@@ -10,7 +10,7 @@ on:
 jobs:
   cmake_package:
     env:
-      DYLD_FRAMEWORK_PATH: /Users/runner/work/sixtyfps/Qt/6.2.1/clang_64/lib
+      DYLD_FRAMEWORK_PATH: /Users/runner/work/slint/Qt/6.2.1/clang_64/lib
       QT_QPA_PLATFORM: offscreen
       CARGO_INCREMENTAL: false
     strategy:
@@ -27,8 +27,8 @@ jobs:
       id: cache-qt
       uses: actions/cache@v2
       with:
-        path: ~/work/sixtyfps/Qt
-        key: ${{ runner.os }}-${{ github.job }}-cpp-qt
+        path: ~/work/slint/Qt
+        key: ${{ runner.os }}-${{ github.job }}-cpp-Qt
     - name: Install Qt (Ubuntu)
       uses: jurplel/install-qt-action@v2
       if: matrix.os == 'ubuntu-20.04'
@@ -72,7 +72,7 @@ jobs:
       with:
         cmakeListsOrSettingsJson: CMakeListsTxtAdvanced
         cmakeListsTxtPath: CMakeLists.txt
-        cmakeAppendedArgs: '-DCMAKE_BUILD_TYPE=RelWithDebInfo -DSIXTYFPS_PACKAGE_BUNDLE_QT=ON'
+        cmakeAppendedArgs: '-DCMAKE_BUILD_TYPE=RelWithDebInfo -DSLINT_PACKAGE_BUNDLE_QT=ON'
         buildDirectory: ${{ runner.workspace }}/cppbuild
         buildWithCMakeArgs: '--config Release'
     - name: cpack
@@ -82,4 +82,4 @@ jobs:
       uses: actions/upload-artifact@v2
       with:
           name: cpp_bin
-          path: ${{ runner.workspace }}/cppbuild/SixtyFPS-cpp-*
+          path: ${{ runner.workspace }}/cppbuild/Slint-cpp-*

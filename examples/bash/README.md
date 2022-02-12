@@ -1,12 +1,12 @@
-# SixtyFPS Bash example
+# Slint Bash example
 
-This shows how to use [`sixtyfps-viewer`](../../tools/viewer) to display dialog from a bash script.
+This shows how to use [`slint-viewer`](../../tools/viewer) to display dialog from a bash script.
 
-This assume that the `sixtyfps-viewer` tool is in patch. This can be achieved with cargo install.
+This assume that the `slint-viewer` tool is in patch. This can be achieved with cargo install.
 (use the `--path tools/viewer` option to install it from the current repository.)
 
 ```bash
-cargo install sixtyfps-viewer
+cargo install slint-viewer
 ```
 
 The examples also assume that [`jq`](https://stedolan.github.io/jq/) is in the path
@@ -19,4 +19,4 @@ The examples also assume that [`jq`](https://stedolan.github.io/jq/) is in the p
 
 The `laptop.svg` icon is `emoji_u1f4bb.svg` from the Noto Emoji font from
     https://github.com/googlefonts/noto-emoji
-and licensed under the terms of the Apache license, version 2.0; copyright Google Inc.
+and licensed under the terms of the SIL Open Font License, version 1.1; copyright Google Inc.

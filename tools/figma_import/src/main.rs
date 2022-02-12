@@ -1,5 +1,5 @@
-// Copyright © SixtyFPS GmbH <info@sixtyfps.io>
-// SPDX-License-Identifier: (GPL-3.0-only OR LicenseRef-SixtyFPS-commercial)
+// Copyright © SixtyFPS GmbH <info@slint-ui.com>
+// SPDX-License-Identifier: GPL-3.0-only OR LicenseRef-Slint-commercial
 
 #![allow(non_snake_case)]
 #![allow(non_camel_case_types)]
@@ -138,7 +138,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             };
             let result = rendered::render(node.name.as_str(), render_node, *backgroundColor, &doc)?;
 
-            std::fs::write("figma_output/main.60", &result)?;
+            std::fs::write("figma_output/main.slint", &result)?;
         }
     }
 
