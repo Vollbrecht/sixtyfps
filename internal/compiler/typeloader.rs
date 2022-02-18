@@ -9,10 +9,10 @@ use std::rc::Rc;
 
 use crate::diagnostics::{BuildDiagnostics, Spanned};
 use crate::object_tree::{self, Document};
-use crate::parser;
 use crate::parser::{syntax_nodes, NodeOrToken, SyntaxKind, SyntaxToken};
 use crate::typeregister::TypeRegister;
 use crate::CompilerConfiguration;
+use crate::{fileaccess, parser};
 
 /// Storage for a cache of all loaded documents
 #[derive(Default)]
@@ -99,7 +99,31 @@ impl<'a> TypeLoader<'a> {
             Cow::from("fluent")
         });
 
-        Self { global_type_registry, compiler_config, style, all_documents: Default::default() }
+        let myself = Self {
+            global_type_registry,
+            compiler_config,
+            style: style.clone(),
+            all_documents: Default::default(),
+        };
+
+        let known_styles = fileaccess::styles();
+        if !known_styles.contains(&style.as_ref())
+            && myself
+                .find_file_in_include_path(None, &format!("{}/std-widgets.slint", style))
+                .is_none()
+        {
+            diag.push_diagnostic_with_span(
+                format!(
+                    "Style {} in not known. Use one of the builtin styles [{}] or make sure your custom style is found in the include directories",
+                    &style,
+                    known_styles.join(", ")
+                ),
+                Default::default(),
+                crate::diagnostics::DiagnosticLevel::Error,
+            );
+        }
+
+        myself
     }
 
     /// Imports of files that don't have the .slint extension are returned.
@@ -548,4 +572,64 @@ fn test_manual_import() {
 
     assert!(!build_diagnostics.has_error());
     assert!(maybe_button_type.is_some());
+}
+
+#[test]
+fn test_builtin_style() {
+    let test_source_path: std::path::PathBuf =
+        [env!("CARGO_MANIFEST_DIR"), "tests", "typeloader"].iter().collect();
+
+    let incdir = test_source_path.join("custom_style");
+
+    let mut compiler_config =
+        CompilerConfiguration::new(crate::generator::OutputFormat::Interpreter);
+    compiler_config.include_paths = vec![incdir];
+    compiler_config.style = Some("fluent".into());
+
+    let global_registry = TypeRegister::builtin();
+    let mut build_diagnostics = BuildDiagnostics::default();
+    let _loader = TypeLoader::new(global_registry, &compiler_config, &mut build_diagnostics);
+
+    assert!(!build_diagnostics.has_error());
+}
+
+#[test]
+fn test_user_style() {
+    let test_source_path: std::path::PathBuf =
+        [env!("CARGO_MANIFEST_DIR"), "tests", "typeloader"].iter().collect();
+
+    let incdir = test_source_path.join("custom_style");
+
+    let mut compiler_config =
+        CompilerConfiguration::new(crate::generator::OutputFormat::Interpreter);
+    compiler_config.include_paths = vec![incdir];
+    compiler_config.style = Some("TestStyle".into());
+
+    let global_registry = TypeRegister::builtin();
+    let mut build_diagnostics = BuildDiagnostics::default();
+    let _loader = TypeLoader::new(global_registry, &compiler_config, &mut build_diagnostics);
+
+    assert!(!build_diagnostics.has_error());
+}
+
+#[test]
+fn test_unknown_style() {
+    let test_source_path: std::path::PathBuf =
+        [env!("CARGO_MANIFEST_DIR"), "tests", "typeloader"].iter().collect();
+
+    let incdir = test_source_path.join("custom_style");
+
+    let mut compiler_config =
+        CompilerConfiguration::new(crate::generator::OutputFormat::Interpreter);
+    compiler_config.include_paths = vec![incdir];
+    compiler_config.style = Some("FooBar".into());
+
+    let global_registry = TypeRegister::builtin();
+    let mut build_diagnostics = BuildDiagnostics::default();
+    let _loader = TypeLoader::new(global_registry, &compiler_config, &mut build_diagnostics);
+
+    assert!(build_diagnostics.has_error());
+    let diags = build_diagnostics.to_string_vec();
+    assert_eq!(diags.len(), 1);
+    assert!(diags[0].starts_with("Style FooBar in not known. Use one of the builtin styles ["));
 }

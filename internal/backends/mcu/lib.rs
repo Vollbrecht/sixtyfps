@@ -3,7 +3,7 @@
 
 #![doc = include_str!("README.md")]
 #![doc(html_logo_url = "https://slint-ui.com/logo/slint-logo-square-light.svg")]
-#![cfg_attr(not(feature = "simulator"), no_std)]
+#![cfg_attr(not(feature = "std"), no_std)]
 #![cfg_attr(feature = "pico-st7789", feature(alloc_error_handler))]
 
 extern crate alloc;
@@ -12,7 +12,6 @@ use alloc::boxed::Box;
 use core::cell::RefCell;
 use embedded_graphics::pixelcolor::Rgb888;
 use embedded_graphics::prelude::*;
-use i_slint_core::graphics::{IntRect, IntSize};
 
 #[cfg(all(not(feature = "std"), feature = "unsafe_single_core"))]
 use i_slint_core::unsafe_single_core;
@@ -26,11 +25,15 @@ mod simulator;
 #[cfg(feature = "simulator")]
 use simulator::event_loop;
 
+mod fonts;
+mod lengths;
 mod renderer;
 
+use lengths::*;
+
 pub trait Devices {
-    fn screen_size(&self) -> IntSize;
-    fn fill_region(&mut self, region: IntRect, pixels: &[Rgb888]);
+    fn screen_size(&self) -> PhysicalSize;
+    fn fill_region(&mut self, region: PhysicalRect, pixels: &[Rgb888]);
     fn read_touch_event(&mut self) -> Option<i_slint_core::input::MouseEvent> {
         None
     }
@@ -45,16 +48,16 @@ where
     T::Error: core::fmt::Debug,
     T::Color: core::convert::From<embedded_graphics::pixelcolor::Rgb888>,
 {
-    fn screen_size(&self) -> i_slint_core::graphics::IntSize {
+    fn screen_size(&self) -> PhysicalSize {
         let s = self.bounding_box().size;
-        i_slint_core::graphics::IntSize::new(s.width, s.height)
+        PhysicalSize::new(s.width as i16, s.height as i16)
     }
 
-    fn fill_region(&mut self, region: i_slint_core::graphics::IntRect, pixels: &[Rgb888]) {
+    fn fill_region(&mut self, region: PhysicalRect, pixels: &[Rgb888]) {
         self.color_converted()
             .fill_contiguous(
                 &embedded_graphics::primitives::Rectangle::new(
-                    Point::new(region.origin.x, region.origin.y),
+                    Point::new(region.origin.x as i32, region.origin.y as i32),
                     Size::new(region.size.width as u32, region.size.height as u32),
                 ),
                 pixels.iter().copied(),
@@ -131,11 +134,18 @@ mod the_backend {
         fn set_mouse_cursor(&self, _cursor: i_slint_core::items::MouseCursor) {}
         fn text_size(
             &self,
-            _font_request: i_slint_core::graphics::FontRequest,
+            font_request: i_slint_core::graphics::FontRequest,
             text: &str,
-            _max_width: Option<f32>,
+            max_width: Option<f32>,
         ) -> Size {
-            Size::new(text.len() as f32 * 10., 10.)
+            let runtime_window = self.self_weak.upgrade().unwrap();
+            crate::fonts::text_size(
+                font_request.merge(&runtime_window.default_font_properties()),
+                text,
+                max_width,
+                ScaleFactor::new(runtime_window.scale_factor()),
+            )
+            .to_untyped()
         }
 
         fn text_input_byte_offset_for_position(
@@ -267,6 +277,13 @@ mod the_backend {
 
         fn quit_event_loop(&'static self) {
             self.with_inner(|inner| inner.post_event(McuEvent::Quit))
+        }
+
+        fn register_bitmap_font(
+            &'static self,
+            font_data: &'static i_slint_core::graphics::BitmapFont,
+        ) {
+            crate::fonts::register_bitmap_font(font_data);
         }
 
         fn set_clipboard_text(&'static self, text: String) {

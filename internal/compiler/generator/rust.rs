@@ -141,7 +141,7 @@ pub fn generate(doc: &Document) -> TokenStream {
         .borrow()
         .iter()
         .map(|(path, er)| {
-            let symbol = format_ident!("SFPS_EMBEDDED_RESOURCE_{}", er.id);
+            let symbol = format_ident!("SLINT_EMBEDDED_RESOURCE_{}", er.id);
             match &er.kind {
                 crate::embedded_resources::EmbeddedResourcesKind::RawData => {
                     let data = embedded_file_tokens(path);
@@ -166,6 +166,43 @@ pub fn generate(doc: &Document) -> TokenStream {
                                     index: 0,
                                 }
                             ])
+                        };
+                    )
+                },
+                crate::embedded_resources::EmbeddedResourcesKind::BitmapFontData(crate::embedded_resources::BitmapFont { family_name, character_map, units_per_em, ascent, descent, glyphs }) => {
+
+                    let character_map = character_map.iter().map(|crate::embedded_resources::CharacterMapEntry{code_point, glyph_index}| quote!(slint::re_exports::CharacterMapEntry { code_point: #code_point, glyph_index: #glyph_index }));
+
+                    let glyphs = glyphs.iter().map(|crate::embedded_resources::BitmapGlyphs{pixel_size, glyph_data}| {
+                        let glyph_data = glyph_data.iter().map(|crate::embedded_resources::BitmapGlyph{x, y, width, height, x_advance, data}|{
+                            quote!(
+                                slint::re_exports::BitmapGlyph {
+                                    x: #x,
+                                    y: #y,
+                                    width: #width,
+                                    height: #height,
+                                    x_advance: #x_advance,
+                                    data: Slice::from_slice(&[#(#data),*]),
+                                }
+                            )
+                        });
+
+                        quote!(
+                            slint::re_exports::BitmapGlyphs {
+                                pixel_size: #pixel_size,
+                                glyph_data: Slice::from_slice(&[#(#glyph_data),*]),
+                            }
+                        )
+                    });
+
+                    quote!(
+                        const #symbol: slint::re_exports::BitmapFont = slint::re_exports::BitmapFont {
+                            family_name: Slice::from_slice(#family_name.as_bytes()),
+                            character_map: Slice::from_slice(&[#(#character_map),*]),
+                            units_per_em: #units_per_em,
+                            ascent: #ascent,
+                            descent: #descent,
+                            glyphs: Slice::from_slice(&[#(#glyphs),*])
                         };
                     )
                 },
@@ -274,6 +311,7 @@ fn generate_public_component(llr: &llr::PublicComponent) -> TokenStream {
             }
         }
 
+        #[allow(dead_code)] // FIXME: some global are unused because of optimization, we should then remove them completely
         struct #global_container_id {
             #(#global_names : ::core::pin::Pin<slint::re_exports::Rc<#global_types>>,)*
         }
@@ -318,7 +356,8 @@ fn handle_property_init(
     if let Type::Callback { args, return_type } = &prop_type {
         let mut ctx2 = ctx.clone();
         ctx2.argument_types = args;
-        let tokens_for_expression = compile_expression(&binding_expression.expression, &ctx2);
+        let tokens_for_expression =
+            compile_expression(&binding_expression.expression.borrow(), &ctx2);
         let as_ = if return_type.as_deref().map_or(true, |t| matches!(t, Type::Void)) {
             quote!(;)
         } else {
@@ -334,7 +373,8 @@ fn handle_property_init(
             });
         }));
     } else {
-        let tokens_for_expression = compile_expression(&binding_expression.expression, ctx);
+        let tokens_for_expression =
+            compile_expression(&binding_expression.expression.borrow(), ctx);
         init.push(if binding_expression.is_constant {
             let t = rust_type(prop_type).unwrap_or(quote!(_));
 
@@ -359,8 +399,7 @@ fn handle_property_init(
                 (#tokens_for_expression) as _
             });
 
-            let is_state_info = matches!(prop_type, Type::Struct { name: Some(name), .. } if name.ends_with("::StateInfo"));
-            if is_state_info {
+            if binding_expression.is_state_info {
                 quote! { {
                     slint::internal::set_property_state_binding(#rust_property, &self_rc, #binding_tokens);
                 } }
@@ -490,7 +529,7 @@ fn generate_sub_component(
     let mut declared_callbacks_types = vec![];
     let mut declared_callbacks_ret = vec![];
 
-    for property in &component.properties {
+    for property in component.properties.iter().filter(|p| p.use_count.get() > 0) {
         let prop_ident = ident(&property.name);
         if let Type::Callback { args, return_type } = &property.ty {
             let callback_args = args.iter().map(|a| rust_type(a).unwrap()).collect::<Vec<_>>();
@@ -519,7 +558,7 @@ fn generate_sub_component(
         for (prop, info) in &item.ty.properties {
             if info.ty.is_property_type() && !prop.starts_with("viewport") && prop != "commands" {
                 let name = format!("{}::{}.{}", component.name, item.name, prop);
-                let elem_name = ident(&item.id);
+                let elem_name = ident(&item.name);
                 let prop = ident(&prop);
                 init.push(quote!(self_rc.#elem_name.#prop.debug_name.replace(#name.into());));
             }
@@ -539,7 +578,7 @@ fn generate_sub_component(
         let repeater_id = format_ident!("repeater{}", idx);
         let rep_inner_component_id = self::inner_component_id(&repeated.sub_tree.root);
 
-        let mut model = compile_expression(&repeated.model, &ctx);
+        let mut model = compile_expression(&repeated.model.borrow(), &ctx);
         if repeated.model.ty(&ctx) == Type::Bool {
             model = quote!(slint::re_exports::ModelRc::new(#model as bool))
         }
@@ -631,7 +670,7 @@ fn generate_sub_component(
     }
 
     #[cfg(slint_debug_property)]
-    builder.init.push(quote!(
+    init.push(quote!(
         #(self_rc.#declared_property_vars.debug_name.replace(
             concat!(stringify!(#inner_component_id), ".", stringify!(#declared_property_vars)).into());)*
     ));
@@ -645,9 +684,20 @@ fn generate_sub_component(
     }
 
     for (prop, expression) in &component.property_init {
-        handle_property_init(prop, expression, &mut init, &ctx)
+        if expression.use_count.get() > 0 {
+            handle_property_init(prop, expression, &mut init, &ctx)
+        }
     }
     for prop in &component.const_properties {
+        if let llr::PropertyReference::Local { property_index, sub_component_path } = prop {
+            let mut sc = component;
+            for i in sub_component_path {
+                sc = &sc.sub_components[*i].ty;
+            }
+            if sc.properties[*property_index].use_count.get() == 0 {
+                continue;
+            }
+        }
         let rust_property = access_member(prop, &ctx);
         init.push(quote!(#rust_property.set_constant();))
     }
@@ -659,10 +709,10 @@ fn generate_sub_component(
         quote!(slint::re_exports::VWeakMapped::<slint::re_exports::ComponentVTable, #parent_component_id>)
     });
 
-    init.extend(component.init_code.iter().map(|e| compile_expression(e, &ctx)));
+    init.extend(component.init_code.iter().map(|e| compile_expression(&e.borrow(), &ctx)));
 
-    let layout_info_h = compile_expression(&component.layout_info_h, &ctx);
-    let layout_info_v = compile_expression(&component.layout_info_v, &ctx);
+    let layout_info_h = compile_expression(&component.layout_info_h.borrow(), &ctx);
+    let layout_info_v = compile_expression(&component.layout_info_v.borrow(), &ctx);
 
     // FIXME! this is only public because of the ComponentHandle::Inner. we should find another way
     let visibility =
@@ -741,7 +791,7 @@ fn generate_global(global: &llr::GlobalComponent, root: &llr::PublicComponent) -
     let mut declared_callbacks_types = vec![];
     let mut declared_callbacks_ret = vec![];
 
-    for property in &global.properties {
+    for property in global.properties.iter().filter(|p| p.use_count.get() > 0) {
         let prop_ident = ident(&property.name);
         if let Type::Callback { args, return_type } = &property.ty {
             let callback_args = args.iter().map(|a| rust_type(a).unwrap()).collect::<Vec<_>>();
@@ -758,16 +808,16 @@ fn generate_global(global: &llr::GlobalComponent, root: &llr::PublicComponent) -
 
     let mut init = vec![];
 
-    let ctx = EvaluationContext {
-        public_component: root,
-        current_sub_component: None,
-        current_global: Some(global),
-        generator_state: quote!(compilation_error("can't access root from global")),
-        parent: None,
-        argument_types: &[],
-    };
+    let ctx = EvaluationContext::new_global(
+        root,
+        global,
+        quote!(compilation_error("can't access root from global")),
+    );
 
     for (property_index, expression) in global.init_values.iter().enumerate() {
+        if global.properties[property_index].use_count.get() == 0 {
+            continue;
+        }
         if let Some(expression) = expression.as_ref() {
             handle_property_init(
                 &llr::PropertyReference::Local { sub_component_path: vec![], property_index },
@@ -778,6 +828,9 @@ fn generate_global(global: &llr::GlobalComponent, root: &llr::PublicComponent) -
         }
     }
     for (property_index, cst) in global.const_properties.iter().enumerate() {
+        if global.properties[property_index].use_count.get() == 0 {
+            continue;
+        }
         if *cst {
             let rust_property = access_member(
                 &llr::PropertyReference::Local { sub_component_path: vec![], property_index },
@@ -1516,7 +1569,7 @@ fn compile_expression(expr: &Expression, ctx: &EvaluationContext) -> TokenStream
                 quote!(slint::re_exports::Image::load_from_path(::std::path::Path::new(#path)).unwrap())
             }
             crate::expression_tree::ImageReference::EmbeddedData { resource_id, extension } => {
-                let symbol = format_ident!("SFPS_EMBEDDED_RESOURCE_{}", resource_id);
+                let symbol = format_ident!("SLINT_EMBEDDED_RESOURCE_{}", resource_id);
                 let format = proc_macro2::Literal::byte_string(extension.as_bytes());
                 quote!(
                     slint::re_exports::Image::from(
@@ -1525,7 +1578,7 @@ fn compile_expression(expr: &Expression, ctx: &EvaluationContext) -> TokenStream
                 )
             }
             crate::expression_tree::ImageReference::EmbeddedTexture { resource_id } => {
-                let symbol = format_ident!("SFPS_EMBEDDED_RESOURCE_{}", resource_id);
+                let symbol = format_ident!("SLINT_EMBEDDED_RESOURCE_{}", resource_id);
                 quote!(
                     slint::re_exports::Image::from(#symbol)
                 )
@@ -1698,7 +1751,7 @@ fn compile_builtin_function_call(
                 quote!(
                     #window_tokens.show_popup(
                         &VRc::into_dyn(#popup_window_id::new(_self.self_weak.get().unwrap().clone()).into()),
-                        Point::new(#x, #y),
+                        Point::new(#x as f32, #y as f32),
                         #parent_component
                     );
                 )
@@ -1727,10 +1780,19 @@ fn compile_builtin_function_call(
         BuiltinFunction::RegisterCustomFontByMemory => {
             if let [Expression::NumberLiteral(resource_id)] = &arguments {
                 let resource_id: usize = *resource_id as _;
-                let symbol = format_ident!("SFPS_EMBEDDED_RESOURCE_{}", resource_id);
+                let symbol = format_ident!("SLINT_EMBEDDED_RESOURCE_{}", resource_id);
                 quote!(slint::register_font_from_memory(#symbol.into());)
             } else {
                 panic!("internal error: invalid args to RegisterCustomFontByMemory {:?}", arguments)
+            }
+        }
+        BuiltinFunction::RegisterBitmapFont => {
+            if let [Expression::NumberLiteral(resource_id)] = &arguments {
+                let resource_id: usize = *resource_id as _;
+                let symbol = format_ident!("SLINT_EMBEDDED_RESOURCE_{}", resource_id);
+                quote!(slint::internal::register_bitmap_font(&#symbol);)
+            } else {
+                panic!("internal error: invalid args to RegisterBitmapFont must be a number")
             }
         }
         BuiltinFunction::GetWindowScaleFactor => {

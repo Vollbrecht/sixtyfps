@@ -111,6 +111,11 @@ pub async fn compile_syntax_node(
 
     let mut loader =
         typeloader::TypeLoader::new(global_type_registry, &compiler_config, &mut diagnostics);
+
+    if diagnostics.has_error() {
+        return (crate::object_tree::Document::default(), diagnostics);
+    }
+
     let foreign_imports =
         loader.load_dependencies_recursively(&doc_node, &mut diagnostics, &type_registry).await;
 

@@ -33,7 +33,7 @@ pub fn lower_to_item_tree(component: &Rc<Component>) -> PublicComponent {
         root: Rc::try_unwrap(sc.sub_component).unwrap(),
         parent_context: None,
     };
-    PublicComponent {
+    let root = PublicComponent {
         item_tree,
         globals,
         sub_components: component
@@ -46,7 +46,9 @@ pub fn lower_to_item_tree(component: &Rc<Component>) -> PublicComponent {
             })
             .collect(),
         public_properties,
-    }
+    };
+    super::optim_passes::run_passes(&root);
+    root
 }
 
 #[derive(Default)]
@@ -187,8 +189,9 @@ fn lower_sub_component(
         const_properties: Default::default(),
         init_code: Default::default(),
         // just initialize to dummy expression right now and it will be set later
-        layout_info_h: super::Expression::BoolLiteral(false),
-        layout_info_v: super::Expression::BoolLiteral(false),
+        layout_info_h: super::Expression::BoolLiteral(false).into(),
+        layout_info_v: super::Expression::BoolLiteral(false).into(),
+        prop_analysis: Default::default(),
     };
     let mut mapping = LoweredSubComponentMapping::default();
     let mut repeated = vec![];
@@ -202,8 +205,13 @@ fn lower_sub_component(
                     element: component.parent_element.clone(),
                 }
                 .ty(),
+                ..Property::default()
             });
-            sub_component.properties.push(Property { name: "model_index".into(), ty: Type::Int32 });
+            sub_component.properties.push(Property {
+                name: "model_index".into(),
+                ty: Type::Int32,
+                ..Property::default()
+            });
         }
     };
 
@@ -220,9 +228,11 @@ fn lower_sub_component(
                 NamedReference::new(element, p),
                 PropertyReference::Local { sub_component_path: vec![], property_index },
             );
-            sub_component
-                .properties
-                .push(Property { name: format!("{}_{}", elem.id, p), ty: x.property_type.clone() });
+            sub_component.properties.push(Property {
+                name: format!("{}_{}", elem.id, p),
+                ty: x.property_type.clone(),
+                ..Property::default()
+            });
         }
         if elem.repeated.is_some() {
             mapping.element_mapping.insert(
@@ -279,7 +289,8 @@ fn lower_sub_component(
             sub_component.two_way_bindings.push((prop.clone(), ctx.map_property_reference(tw)))
         }
         if !matches!(binding.expression, tree_Expression::Invalid) {
-            let expression = super::lower_expression::lower_expression(&binding.expression, &ctx);
+            let expression =
+                super::lower_expression::lower_expression(&binding.expression, &ctx).into();
 
             let is_constant = binding.analysis.as_ref().map_or(false, |a| a.is_const);
             let animation = binding
@@ -287,9 +298,30 @@ fn lower_sub_component(
                 .as_ref()
                 .filter(|_| !is_constant)
                 .map(|a| super::lower_expression::lower_animation(a, &ctx));
-            sub_component
-                .property_init
-                .push((prop.clone(), BindingExpression { expression, animation, is_constant }));
+
+            sub_component.prop_analysis.insert(
+                prop.clone(),
+                PropAnalysis {
+                    property_init: Some(sub_component.property_init.len()),
+                    analysis: get_property_analysis(e, p),
+                },
+            );
+
+            let is_state_info = matches!(
+                e.borrow().lookup_property(p).property_type,
+                Type::Struct { name: Some(name), .. } if name.ends_with("::StateInfo")
+            );
+
+            sub_component.property_init.push((
+                prop.clone(),
+                BindingExpression {
+                    expression,
+                    animation,
+                    is_constant,
+                    is_state_info,
+                    use_count: 0.into(),
+                },
+            ));
         }
 
         if e.borrow()
@@ -331,7 +363,7 @@ fn lower_sub_component(
         .setup_code
         .borrow()
         .iter()
-        .map(|e| super::lower_expression::lower_expression(e, &ctx))
+        .map(|e| super::lower_expression::lower_expression(e, &ctx).into())
         .collect();
 
     sub_component.layout_info_h = super::lower_expression::get_layout_info(
@@ -339,15 +371,41 @@ fn lower_sub_component(
         &ctx,
         &component.root_constraints.borrow(),
         crate::layout::Orientation::Horizontal,
-    );
+    )
+    .into();
     sub_component.layout_info_v = super::lower_expression::get_layout_info(
         &component.root_element,
         &ctx,
         &component.root_constraints.borrow(),
         crate::layout::Orientation::Vertical,
-    );
+    )
+    .into();
 
     LoweredSubComponent { sub_component: Rc::new(sub_component), mapping }
+}
+
+fn get_property_analysis(elem: &ElementRc, p: &str) -> crate::object_tree::PropertyAnalysis {
+    let mut a = elem.borrow().property_analysis.borrow().get(p).cloned().unwrap_or_default();
+    let mut elem = elem.clone();
+    loop {
+        let base = elem.borrow().base_type.clone();
+        match base {
+            Type::Native(n) => {
+                if n.properties.get(p).map_or(false, |p| p.is_native_output) {
+                    a.is_set = true;
+                }
+            }
+            Type::Component(c) => {
+                elem = c.root_element.clone();
+                if let Some(a2) = elem.borrow().property_analysis.borrow().get(p) {
+                    a.merge_with_base(a2);
+                }
+                continue;
+            }
+            _ => (),
+        };
+        return a;
+    }
 }
 
 fn lower_repeated_component(elem: &ElementRc, ctx: &ExpressionContext) -> RepeatedElement {
@@ -375,7 +433,7 @@ fn lower_repeated_component(elem: &ElementRc, ctx: &ExpressionContext) -> Repeat
     });
 
     RepeatedElement {
-        model: super::lower_expression::lower_expression(&repeated.model, ctx),
+        model: super::lower_expression::lower_expression(&repeated.model, ctx).into(),
         sub_tree: ItemTree {
             tree: make_tree(ctx.state, &component.root_element, &sc, &[]),
             root: Rc::try_unwrap(sc.sub_component).unwrap(),
@@ -416,6 +474,7 @@ fn lower_global(
     let mut mapping = LoweredSubComponentMapping::default();
     let mut properties = vec![];
     let mut const_properties = vec![];
+    let mut prop_analysis = vec![];
 
     for (p, x) in &global.root_element.borrow().property_declarations {
         let property_index = properties.len();
@@ -425,10 +484,26 @@ fn lower_global(
             PropertyReference::Local { sub_component_path: vec![], property_index },
         );
 
-        properties.push(Property { name: p.clone(), ty: x.property_type.clone() });
+        properties.push(Property {
+            name: p.clone(),
+            ty: x.property_type.clone(),
+            ..Property::default()
+        });
         if !matches!(x.property_type, Type::Callback { .. }) {
             const_properties.push(nr.is_constant());
+        } else {
+            const_properties.push(false);
         }
+        prop_analysis.push(
+            global
+                .root_element
+                .borrow()
+                .property_analysis
+                .borrow()
+                .get(p)
+                .cloned()
+                .unwrap_or_default(),
+        );
         state
             .global_properties
             .insert(nr.clone(), PropertyReference::Global { global_index, property_index });
@@ -441,7 +516,7 @@ fn lower_global(
         assert!(binding.borrow().two_way_bindings.is_empty());
         assert!(binding.borrow().animation.is_none());
         let expression =
-            super::lower_expression::lower_expression(&binding.borrow().expression, &ctx);
+            super::lower_expression::lower_expression(&binding.borrow().expression, &ctx).into();
 
         let nr = NamedReference::new(&global.root_element, prop);
         let property_index = match mapping.property_mapping[&nr] {
@@ -449,19 +524,34 @@ fn lower_global(
             _ => unreachable!(),
         };
         let is_constant = binding.borrow().analysis.as_ref().map_or(false, |a| a.is_const);
-        init_values[property_index] =
-            Some(BindingExpression { expression, animation: None, is_constant });
+        init_values[property_index] = Some(BindingExpression {
+            expression,
+            animation: None,
+            is_constant,
+            is_state_info: false,
+            use_count: 0.into(),
+        });
     }
 
     let is_builtin = if let Some(builtin) = global.root_element.borrow().native_class() {
         // We just generate the property so we know how to address them
         for (p, x) in &builtin.properties {
             let property_index = properties.len();
-            properties.push(Property { name: p.clone(), ty: x.ty.clone() });
+            properties.push(Property { name: p.clone(), ty: x.ty.clone(), ..Property::default() });
             let nr = NamedReference::new(&global.root_element, p);
             state
                 .global_properties
                 .insert(nr, PropertyReference::Global { global_index, property_index });
+            prop_analysis.push(
+                global
+                    .root_element
+                    .borrow()
+                    .property_analysis
+                    .borrow()
+                    .get(p)
+                    .cloned()
+                    .unwrap_or_default(),
+            );
         }
         true
     } else {
@@ -478,6 +568,7 @@ fn lower_global(
         exported: !global.exported_global_names.borrow().is_empty(),
         aliases: global.global_aliases(),
         is_builtin,
+        prop_analysis,
     }
 }
 

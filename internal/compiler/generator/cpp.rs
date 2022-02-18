@@ -420,10 +420,11 @@ fn handle_property_init(
                     }});",
             prop_access = prop_access,
             params = params.join(", "),
-            code = compile_expression_wrap_return(&binding_expression.expression, &ctx2)
+            code = compile_expression_wrap_return(&binding_expression.expression.borrow(), &ctx2)
         ));
     } else {
-        let init_expr = compile_expression_wrap_return(&binding_expression.expression, ctx);
+        let init_expr =
+            compile_expression_wrap_return(&binding_expression.expression.borrow(), ctx);
 
         init.push(if binding_expression.is_constant {
             format!("{}.set({});", prop_access, init_expr)
@@ -436,8 +437,7 @@ fn handle_property_init(
                 init = init_expr
             );
 
-            let is_state_info = matches!(prop_type, Type::Struct { name: Some(name), .. } if name.ends_with("::StateInfo"));
-            if is_state_info {
+            if binding_expression.is_state_info {
                 format!("slint::private_api::set_state_binding({}, {});", prop_access, binding_code)
             } else {
                 match &binding_expression.animation {
@@ -502,12 +502,13 @@ pub fn generate(doc: &Document) -> impl std::fmt::Display {
 
                     Declaration::Var(Var {
                         ty: "inline uint8_t".into(),
-                        name: format!("sfps_embedded_resource_{}", er.id),
+                        name: format!("slint_embedded_resource_{}", er.id),
                         array_size: Some(data.len()),
                         init: Some(init),
                     })
                 }
                 crate::embedded_resources::EmbeddedResourcesKind::TextureData(_) => todo!(),
+                crate::embedded_resources::EmbeddedResourcesKind::BitmapFontData(_) => todo!(),
             }
         },
     ));
@@ -1128,7 +1129,7 @@ fn generate_sub_component(
         file.declarations.push(Declaration::Struct(popup_struct));
     });
 
-    for property in &component.properties {
+    for property in component.properties.iter().filter(|p| p.use_count.get() > 0) {
         let cpp_name = ident(&property.name);
 
         let ty = if let Type::Callback { args, return_type } = &property.ty {
@@ -1212,7 +1213,9 @@ fn generate_sub_component(
 
     let mut properties_init_code = Vec::new();
     for (prop, expression) in &component.property_init {
-        handle_property_init(prop, expression, &mut properties_init_code, &ctx)
+        if expression.use_count.get() > 0 {
+            handle_property_init(prop, expression, &mut properties_init_code, &ctx)
+        }
     }
 
     for item in &component.items {
@@ -1247,7 +1250,7 @@ fn generate_sub_component(
 
         let repeater_id = format!("repeater_{}", idx);
 
-        let mut model = compile_expression(&repeated.model, &ctx);
+        let mut model = compile_expression(&repeated.model.borrow(), &ctx);
         if repeated.model.ty(&ctx) == Type::Bool {
             // bool converts to int
             // FIXME: don't do a heap allocation here
@@ -1302,7 +1305,7 @@ fn generate_sub_component(
 
     init.extend(subcomponent_init_code);
     init.extend(properties_init_code);
-    init.extend(component.init_code.iter().map(|e| compile_expression(e, &ctx)));
+    init.extend(component.init_code.iter().map(|e| compile_expression(&e.borrow(), &ctx)));
 
     target_struct.members.push((
         field_access,
@@ -1324,8 +1327,8 @@ fn generate_sub_component(
                 "[[maybe_unused]] auto self = this;".into(),
                 format!(
                     "return o == slint::cbindgen_private::Orientation::Horizontal ? {} : {};",
-                    compile_expression(&component.layout_info_h, &ctx),
-                    compile_expression(&component.layout_info_v, &ctx)
+                    compile_expression(&component.layout_info_h.borrow(), &ctx),
+                    compile_expression(&component.layout_info_v.borrow(), &ctx)
                 ),
             ]),
             ..Default::default()
@@ -1448,7 +1451,7 @@ fn generate_repeated_component(
 fn generate_global(file: &mut File, global: &llr::GlobalComponent, root: &llr::PublicComponent) {
     let mut global_struct = Struct { name: ident(&global.name), ..Default::default() };
 
-    for property in &global.properties {
+    for property in global.properties.iter().filter(|p| p.use_count.get() > 0) {
         let cpp_name = ident(&property.name);
 
         let ty = if let Type::Callback { args, return_type } = &property.ty {
@@ -1471,16 +1474,17 @@ fn generate_global(file: &mut File, global: &llr::GlobalComponent, root: &llr::P
 
     let mut init = vec![];
 
-    let ctx = EvaluationContext {
-        public_component: root,
-        current_sub_component: None,
-        current_global: Some(global),
-        generator_state: "\n#error can't access root from global\n".into(),
-        parent: None,
-        argument_types: &[],
-    };
+    let ctx = EvaluationContext::new_global(
+        root,
+        global,
+        "\n#error can't access root from global\n".into(),
+    );
 
     for (property_index, expression) in global.init_values.iter().enumerate() {
+        if global.properties[property_index].use_count.get() == 0 {
+            continue;
+        }
+
         if let Some(expression) = expression.as_ref() {
             handle_property_init(
                 &llr::PropertyReference::Local { sub_component_path: vec![], property_index },
@@ -1936,7 +1940,7 @@ fn compile_expression(expr: &llr::Expression, ctx: &EvaluationContext) -> String
                 crate::expression_tree::ImageReference::None => r#"slint::Image()"#.to_string(),
                 crate::expression_tree::ImageReference::AbsolutePath(path) => format!(r#"slint::Image::load_from_path(slint::SharedString(u8"{}"))"#, escape_string(path.as_str())),
                 crate::expression_tree::ImageReference::EmbeddedData { resource_id, extension } => {
-                    let symbol = format!("sfps_embedded_resource_{}", resource_id);
+                    let symbol = format!("slint_embedded_resource_{}", resource_id);
                     format!(
                         r#"slint::Image(slint::cbindgen_private::types::ImageInner::EmbeddedData(slint::cbindgen_private::Slice<uint8_t>{{std::data({}), std::size({})}}, slint::cbindgen_private::Slice<uint8_t>{{const_cast<uint8_t *>(reinterpret_cast<const uint8_t *>(u8"{}")), {}}}))"#,
                         symbol, symbol, escape_string(extension), extension.as_bytes().len()
@@ -2180,7 +2184,7 @@ fn compile_builtin_function_call(
         BuiltinFunction::RegisterCustomFontByMemory => {
             if let [llr::Expression::NumberLiteral(resource_id)] = &arguments {
                 let resource_id: usize = *resource_id as _;
-                let symbol = format!("sfps_embedded_resource_{}", resource_id);
+                let symbol = format!("slint_embedded_resource_{}", resource_id);
                 format!(
                     "slint::private_api::register_font_from_data({}, std::size({}));",
                     symbol, symbol
@@ -2188,6 +2192,9 @@ fn compile_builtin_function_call(
             } else {
                 panic!("internal error: invalid args to RegisterCustomFontByMemory {:?}", arguments)
             }
+        }
+        BuiltinFunction::RegisterBitmapFont => {
+            todo!()
         }
         BuiltinFunction::ImplicitLayoutInfo(orient) => {
             if let [llr::Expression::PropertyReference(pr)] = arguments {

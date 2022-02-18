@@ -980,7 +980,7 @@ pub unsafe extern "C" fn slint_flickable_data_free(data: *mut FlickableDataBox) 
 
 /// The implementation of the `PropertyAnimation` element
 #[repr(C)]
-#[derive(FieldOffsets, Default, SlintElement, Clone, Debug)]
+#[derive(FieldOffsets, SlintElement, Clone, Debug)]
 #[pin]
 pub struct PropertyAnimation {
     #[rtti_field]
@@ -991,6 +991,14 @@ pub struct PropertyAnimation {
     pub iteration_count: f32,
     #[rtti_field]
     pub easing: crate::animations::EasingCurve,
+}
+
+impl Default for PropertyAnimation {
+    fn default() -> Self {
+        // Defaults for PropertyAnimation are defined here (for internal Rust code doing programmatic animations)
+        // as well as in `builtins.slint` (for generated C++ and Rust code)
+        Self { delay: 0, duration: 0, iteration_count: 1., easing: Default::default() }
+    }
 }
 
 /// The implementation of the `Window` element

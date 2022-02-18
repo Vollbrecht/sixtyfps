@@ -8,11 +8,17 @@ use core::pin::Pin;
 
 use embedded_graphics::pixelcolor::Rgb888;
 use embedded_graphics::prelude::*;
-use i_slint_core::graphics::{IntRect, PixelFormat, Point as PointF, Rect as RectF, Size as SizeF};
-use i_slint_core::items::Item;
+use i_slint_core::graphics::{FontRequest, IntRect, PixelFormat, Rect as RectF};
 use i_slint_core::{Color, ImageInner};
 
-use crate::Devices;
+use crate::fonts::FontMetrics;
+use crate::lengths::PhysicalPx;
+use crate::{
+    Devices, LogicalItemGeometry, LogicalPoint, LogicalRect, PhysicalLength, PhysicalPoint,
+    PhysicalRect, PhysicalSize, PointLengths, RectLengths, ScaleFactor, SizeLengths,
+};
+
+use euclid::num::Zero;
 
 pub fn render_window_frame(
     runtime_window: Rc<i_slint_core::window::Window>,
@@ -20,7 +26,7 @@ pub fn render_window_frame(
     devices: &mut dyn Devices,
 ) {
     let size = devices.screen_size();
-    let mut scene = prepare_scene(runtime_window, SizeF::new(size.width as _, size.height as _));
+    let mut scene = prepare_scene(runtime_window, size);
 
     /*for item in scene.future_items {
         match item.command {
@@ -63,19 +69,21 @@ pub fn render_window_frame(
     }*/
 
     let mut line_buffer = vec![background; size.width as usize];
-    while scene.current_line < size.height as u16 {
+    while scene.current_line < size.height_length() {
         line_buffer.fill(background);
         let line = scene.process_line();
         for span in line.spans.iter().rev() {
             match span.command {
-                SceneCommand::Rectangle { color } => {
+                SceneCommand::Rectangle => {
+                    let color = scene.rectangles[span.data_index];
                     let alpha = color.alpha();
                     if alpha == u8::MAX {
-                        line_buffer[(span.x) as usize..(span.x + span.width) as usize]
+                        line_buffer[span.pos.x as usize
+                            ..(span.pos.x_length() + span.size.width_length()).get() as usize]
                             .fill(to_rgb888_color_discard_alpha(color))
                     } else {
-                        for pix in
-                            &mut line_buffer[(span.x) as usize..(span.x + span.width) as usize]
+                        for pix in &mut line_buffer[span.pos.x as usize
+                            ..(span.pos.x_length() + span.size.width_length()).get() as usize]
                         {
                             let a = (u8::MAX - alpha) as u16;
                             let b = alpha as u16;
@@ -87,25 +95,27 @@ pub fn render_window_frame(
                         }
                     }
                 }
-                SceneCommand::Texture {
-                    data,
-                    format,
-                    stride,
-                    source_width,
-                    source_height,
-                    color,
-                } => {
-                    let sx = span.width as f32 / source_width as f32;
-                    let sy = span.height as f32 / source_height as f32;
-                    let bpp = bpp(format) as usize;
-                    let y = line.line - span.y;
+                SceneCommand::Texture => {
+                    let SceneTexture { data, format, stride, source_size, color } =
+                        scene.textures[span.data_index];
 
-                    for (x, pix) in line_buffer[(span.x) as usize..(span.x + span.width) as usize]
+                    let sx: euclid::Scale<f32, PhysicalPx, PhysicalPx> =
+                        span.size.width_length().cast::<f32>()
+                            / source_size.width_length().cast::<f32>();
+                    let sy: euclid::Scale<f32, PhysicalPx, PhysicalPx> =
+                        span.size.height_length().cast::<f32>()
+                            / source_size.height_length().cast::<f32>();
+                    let bpp = bpp(format) as usize;
+                    let y = (line.line - span.pos.y_length()).cast::<f32>();
+
+                    for (x, pix) in line_buffer[span.pos.x as usize
+                        ..(span.pos.x_length() + span.size.width_length()).get() as usize]
                         .iter_mut()
                         .enumerate()
+                        .map(|(x, pix)| (PhysicalLength::new(x as i16).cast::<f32>(), pix))
                     {
-                        let pos = ((y as f32 / sy) as usize * stride as usize)
-                            + (x as f32 / sx) as usize * bpp;
+                        let pos = ((y / sy).get() as usize * stride as usize)
+                            + (x / sx).get() as usize * bpp;
                         *pix = match format {
                             PixelFormat::Rgb => {
                                 Rgb888::new(data[pos + 0], data[pos + 1], data[pos + 2])
@@ -147,13 +157,13 @@ pub fn render_window_frame(
                 }
             }
         }
-        devices.fill_region(euclid::rect(0, line.line as i32, size.width as i32, 1), &line_buffer)
+        devices.fill_region(euclid::rect(0, line.line.get() as i16, size.width, 1), &line_buffer)
     }
 }
 
 struct Scene {
     /// the next line to be processed
-    current_line: u16,
+    current_line: PhysicalLength,
 
     /// Element that have `y > current_line`
     /// They must be sorted by `y` in reverse order (bottom to top)
@@ -165,16 +175,21 @@ struct Scene {
 
     /// Some staging buffer of scene item
     next_items: VecDeque<SceneItem>,
+
+    rectangles: Vec<Color>,
+    textures: Vec<SceneTexture>,
 }
 
 impl Scene {
-    fn new(mut items: Vec<SceneItem>) -> Self {
-        items.sort_by(|a, b| compare_scene_item(a, b).reverse());
+    fn new(mut items: Vec<SceneItem>, rectangles: Vec<Color>, textures: Vec<SceneTexture>) -> Self {
+        items.sort_unstable_by(|a, b| compare_scene_item(a, b).reverse());
         Self {
             future_items: items,
-            current_line: 0,
+            current_line: PhysicalLength::zero(),
             current_items: Default::default(),
             next_items: Default::default(),
+            rectangles,
+            textures,
         }
     }
 
@@ -183,8 +198,11 @@ impl Scene {
         let mut command = vec![];
         // Take the next element from current_items or future_items
         loop {
-            let a_next_z =
-                self.future_items.last().filter(|i| i.y == self.current_line).map(|i| i.z);
+            let a_next_z = self
+                .future_items
+                .last()
+                .filter(|i| i.pos.y_length() == self.current_line)
+                .map(|i| i.z);
             let b_next_z = self.current_items.front().map(|i| i.z);
             let item = match (a_next_z, b_next_z) {
                 (Some(a), Some(b)) => {
@@ -199,47 +217,39 @@ impl Scene {
                 _ => break,
             };
             let item = item.unwrap();
-            if item.y + item.height > self.current_line + 1 {
+            if item.pos.y_length() + item.size.height_length()
+                > self.current_line + PhysicalLength::new(1)
+            {
                 self.next_items.push_back(item.clone());
             }
             command.push(item);
         }
         core::mem::swap(&mut self.next_items, &mut self.current_items);
         let line = self.current_line;
-        self.current_line += 1;
+        self.current_line += PhysicalLength::new(1);
         LineCommand { spans: command, line }
     }
 }
 
 #[derive(Clone, Copy)]
-struct ScaleFactor(pub f32);
-impl core::ops::Mul<ScaleFactor> for f32 {
-    type Output = u16;
-    fn mul(self, rhs: ScaleFactor) -> Self::Output {
-        (rhs.0 * self) as _
-    }
-}
-
-#[derive(Clone, Copy)]
 struct SceneItem {
-    x: u16,
-    y: u16,
-    width: u16,
-    height: u16,
+    pos: PhysicalPoint,
+    size: PhysicalSize,
     // this is the order of the item from which it is in the item tree
     z: u16,
     command: SceneCommand,
+    data_index: usize, // SceneCommand specific index in textures, etc. arrays for additional data
 }
 
 struct LineCommand {
-    line: u16,
+    line: PhysicalLength,
     // Fixme: we need to process these so we do not draw items under opaque regions
     spans: Vec<SceneItem>,
 }
 
 fn compare_scene_item(a: &SceneItem, b: &SceneItem) -> core::cmp::Ordering {
     // First, order by line (top to bottom)
-    match a.y.partial_cmp(&b.y) {
+    match a.pos.y.partial_cmp(&b.pos.y) {
         None | Some(core::cmp::Ordering::Equal) => {}
         Some(ord) => return ord,
     }
@@ -254,23 +264,27 @@ fn compare_scene_item(a: &SceneItem, b: &SceneItem) -> core::cmp::Ordering {
 }
 
 #[derive(Clone, Copy)]
+#[repr(u8)]
 enum SceneCommand {
-    Rectangle {
-        color: Color,
-    },
-    Texture {
-        data: &'static [u8],
-        format: PixelFormat,
-        /// bytes between two lines in the source
-        stride: u16,
-        source_width: u16,
-        source_height: u16,
-        color: Color,
-    },
+    Rectangle,
+    Texture,
 }
 
-fn prepare_scene(runtime_window: Rc<i_slint_core::window::Window>, size: SizeF) -> Scene {
-    let mut prepare_scene = PrepareScene::new(size, ScaleFactor(runtime_window.scale_factor()));
+struct SceneTexture {
+    data: &'static [u8],
+    format: PixelFormat,
+    /// bytes between two lines in the source
+    stride: u16,
+    source_size: PhysicalSize,
+    color: Color,
+}
+
+fn prepare_scene(runtime_window: Rc<i_slint_core::window::Window>, size: PhysicalSize) -> Scene {
+    let mut prepare_scene = PrepareScene::new(
+        size,
+        ScaleFactor::new(runtime_window.scale_factor()),
+        runtime_window.default_font_properties(),
+    );
     runtime_window.draw_contents(|components| {
         for (component, origin) in components {
             i_slint_core::item_rendering::render_component_items(
@@ -280,51 +294,68 @@ fn prepare_scene(runtime_window: Rc<i_slint_core::window::Window>, size: SizeF) 
             );
         }
     });
-    Scene::new(prepare_scene.items)
+    Scene::new(prepare_scene.items, prepare_scene.rectangles, prepare_scene.textures)
 }
 
 struct PrepareScene {
     items: Vec<SceneItem>,
+    rectangles: Vec<Color>,
+    textures: Vec<SceneTexture>,
     state_stack: Vec<RenderState>,
     current_state: RenderState,
     scale_factor: ScaleFactor,
+    default_font: FontRequest,
 }
 
 impl PrepareScene {
-    fn new(size: SizeF, scale_factor: ScaleFactor) -> Self {
+    fn new(size: PhysicalSize, scale_factor: ScaleFactor, default_font: FontRequest) -> Self {
         Self {
             items: vec![],
+            rectangles: vec![],
+            textures: vec![],
             state_stack: vec![],
             current_state: RenderState {
                 alpha: 1.,
-                offset: PointF::default(),
-                clip: RectF::new(PointF::default(), size / scale_factor.0),
+                offset: LogicalPoint::default(),
+                clip: LogicalRect::new(LogicalPoint::default(), size.cast() / scale_factor),
             },
             scale_factor,
+            default_font,
         }
     }
 
-    fn should_draw(&self, rect: &RectF) -> bool {
+    fn should_draw(&self, rect: &LogicalRect) -> bool {
         !rect.size.is_empty()
             && self.current_state.alpha > 0.01
             && self.current_state.clip.intersects(rect)
     }
 
-    fn new_scene_item(&mut self, geometry: RectF, command: SceneCommand) {
+    fn new_scene_rectangle(&mut self, geometry: LogicalRect, color: Color) {
+        self.rectangles.push(color);
+        self.new_scene_item(geometry, SceneCommand::Rectangle, self.rectangles.len() - 1);
+    }
+
+    fn new_scene_texture(&mut self, geometry: LogicalRect, texture: SceneTexture) {
+        self.textures.push(texture);
+        self.new_scene_item(geometry, SceneCommand::Texture, self.textures.len() - 1);
+    }
+
+    fn new_scene_item(&mut self, geometry: LogicalRect, command: SceneCommand, data_index: usize) {
         let z = self.items.len() as u16;
+
         self.items.push(SceneItem {
-            x: (self.current_state.offset.x + geometry.origin.x) * self.scale_factor,
-            y: (self.current_state.offset.y + geometry.origin.y) * self.scale_factor,
-            width: geometry.size.width * self.scale_factor,
-            height: geometry.size.height * self.scale_factor,
+            pos: ((geometry.origin + self.current_state.offset.to_vector()) * self.scale_factor)
+                .cast(),
+            size: (geometry.size * self.scale_factor).cast(),
             z,
             command,
+            data_index,
         });
     }
 
     fn draw_image_impl(
         &mut self,
-        geom: RectF,
+        geom: LogicalRect,
         source: &i_slint_core::graphics::Image,
         source_clip: IntRect,
         colorize: Color,
@@ -342,21 +373,26 @@ impl PrepareScene {
                 for t in textures.as_slice() {
                     if let Some(dest_rect) = t.rect.intersection(&source_clip).and_then(|r| {
                         r.intersection(
-                            &self.current_state.clip.scale(1. / sx, 1. / sy).round_in().cast(),
+                            &self
+                                .current_state
+                                .clip
+                                .to_untyped()
+                                .scale(1. / sx, 1. / sy)
+                                .round_in()
+                                .cast(),
                         )
                     }) {
                         let actual_x = dest_rect.origin.x - t.rect.origin.x;
                         let actual_y = dest_rect.origin.y - t.rect.origin.y;
                         let stride = t.rect.width() as u16 * bpp(t.format);
-                        self.new_scene_item(
-                            dest_rect.cast().scale(sx, sy),
-                            SceneCommand::Texture {
+                        self.new_scene_texture(
+                            LogicalRect::from_untyped(&dest_rect.cast().scale(sx, sy)),
+                            SceneTexture {
                                 data: &data.as_slice()[(t.index
                                     + (stride as usize) * (actual_y as usize)
                                     + (bpp(t.format) as usize) * (actual_x as usize))..],
                                 stride,
-                                source_height: dest_rect.height() as u16,
-                                source_width: dest_rect.width() as u16,
+                                source_size: PhysicalSize::from_untyped(dest_rect.size.cast()),
                                 format: t.format,
                                 color: if colorize.alpha() > 0 { colorize } else { t.color },
                             },
@@ -371,13 +407,13 @@ impl PrepareScene {
 #[derive(Clone, Copy)]
 struct RenderState {
     alpha: f32,
-    offset: PointF,
-    clip: RectF,
+    offset: LogicalPoint,
+    clip: LogicalRect,
 }
 
 impl i_slint_core::item_rendering::ItemRenderer for PrepareScene {
     fn draw_rectangle(&mut self, rect: Pin<&i_slint_core::items::Rectangle>) {
-        let geom = RectF::new(PointF::default(), rect.geometry().size);
+        let geom = LogicalRect::new(LogicalPoint::default(), rect.logical_geometry().size_length());
         if self.should_draw(&geom) {
             let geom = match geom.intersection(&self.current_state.clip) {
                 Some(geom) => geom,
@@ -389,12 +425,12 @@ impl i_slint_core::item_rendering::ItemRenderer for PrepareScene {
             if color.alpha() == 0 {
                 return;
             }
-            self.new_scene_item(geom, SceneCommand::Rectangle { color });
+            self.new_scene_rectangle(geom, color);
         }
     }
 
     fn draw_border_rectangle(&mut self, rect: Pin<&i_slint_core::items::BorderRectangle>) {
-        let geom = RectF::new(PointF::default(), rect.geometry().size);
+        let geom = LogicalRect::new(LogicalPoint::default(), rect.logical_geometry().size_length());
         if self.should_draw(&geom) {
             let border = rect.border_width();
             // FIXME: gradients
@@ -403,7 +439,7 @@ impl i_slint_core::item_rendering::ItemRenderer for PrepareScene {
                 if let Some(r) =
                     geom.inflate(-border, -border).intersection(&self.current_state.clip)
                 {
-                    self.new_scene_item(r, SceneCommand::Rectangle { color });
+                    self.new_scene_rectangle(r, color);
                 }
             }
             if border > 0.01 {
@@ -411,9 +447,9 @@ impl i_slint_core::item_rendering::ItemRenderer for PrepareScene {
                 // FIXME: gradients
                 let border_color = rect.border_color().color();
                 if border_color.alpha() > 0 {
-                    let mut add_border = |r: RectF| {
+                    let mut add_border = |r: LogicalRect| {
                         if let Some(r) = r.intersection(&self.current_state.clip) {
-                            self.new_scene_item(r, SceneCommand::Rectangle { color: border_color });
+                            self.new_scene_rectangle(r, border_color);
                         }
                     };
                     add_border(euclid::rect(0., 0., geom.width(), border));
@@ -431,7 +467,8 @@ impl i_slint_core::item_rendering::ItemRenderer for PrepareScene {
     }
 
     fn draw_image(&mut self, image: Pin<&i_slint_core::items::ImageItem>) {
-        let geom = RectF::new(PointF::default(), image.geometry().size);
+        let geom =
+            LogicalRect::new(LogicalPoint::default(), image.logical_geometry().size_length());
         if self.should_draw(&geom) {
             self.draw_image_impl(
                 geom,
@@ -446,7 +483,8 @@ impl i_slint_core::item_rendering::ItemRenderer for PrepareScene {
         // when the source_clip size is empty, make it full
         let a = |v| if v == 0 { i32::MAX } else { v };
 
-        let geom = RectF::new(PointF::default(), image.geometry().size);
+        let geom =
+            LogicalRect::new(LogicalPoint::default(), image.logical_geometry().size_length());
         if self.should_draw(&geom) {
             self.draw_image_impl(
                 geom,
@@ -462,15 +500,47 @@ impl i_slint_core::item_rendering::ItemRenderer for PrepareScene {
         }
     }
 
-    fn draw_text(&mut self, _text: Pin<&i_slint_core::items::Text>) {
-        // TODO
+    fn draw_text(&mut self, text: Pin<&i_slint_core::items::Text>) {
+        let font_request = text.unresolved_font_request().merge(&self.default_font);
+        let (font, glyphs) = crate::fonts::match_font(&font_request, self.scale_factor);
+
+        let color = text.color().color();
+
+        let baseline_y = glyphs.ascent(font);
+
+        for (glyph_baseline_x, glyph) in crate::fonts::glyphs_for_text(font, glyphs, &text.text()) {
+            if let Some(dest_rect) = (PhysicalRect::new(
+                PhysicalPoint::from_lengths(
+                    glyph_baseline_x + glyph.x(),
+                    baseline_y - glyph.y() - glyph.height(),
+                ),
+                glyph.size(),
+            )
+            .cast()
+                / self.scale_factor)
+                .intersection(&self.current_state.clip)
+            {
+                let stride = glyph.width().get() as u16;
+
+                self.new_scene_texture(
+                    dest_rect,
+                    SceneTexture {
+                        data: glyph.data().as_slice(),
+                        stride,
+                        source_size: glyph.size(),
+                        format: PixelFormat::AlphaMap,
+                        color,
+                    },
+                );
+            }
+        }
     }
 
     fn draw_text_input(&mut self, _text_input: Pin<&i_slint_core::items::TextInput>) {
         // TODO
     }
 
-    #[cfg(feature = "simulator")]
+    #[cfg(feature = "std")]
     fn draw_path(&mut self, _path: Pin<&i_slint_core::items::Path>) {
         // TODO
     }
@@ -480,19 +550,19 @@ impl i_slint_core::item_rendering::ItemRenderer for PrepareScene {
     }
 
     fn combine_clip(&mut self, other: RectF, _radius: f32, _border_width: f32) {
-        match self.current_state.clip.intersection(&other) {
+        match self.current_state.clip.intersection(&LogicalRect::from_untyped(&other)) {
             Some(r) => {
                 self.current_state.clip = r;
             }
             None => {
-                self.current_state.clip = RectF::default();
+                self.current_state.clip = LogicalRect::default();
             }
         };
         // TODO: handle radius and border
     }
 
     fn get_current_clip(&self) -> i_slint_core::graphics::Rect {
-        self.current_state.clip
+        self.current_state.clip.to_untyped()
     }
 
     fn translate(&mut self, x: f32, y: f32) {

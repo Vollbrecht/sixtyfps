@@ -22,6 +22,10 @@ impl<'a> VirtualFile<'a> {
     }
 }
 
+pub fn styles() -> Vec<&'static str> {
+    builtin_library::styles()
+}
+
 pub fn load_file<'a>(path: &'a std::path::Path) -> Option<VirtualFile<'static>> {
     match path.strip_prefix("builtin:/") {
         Ok(builtin_path) => builtin_library::load_builtin_file(builtin_path),
@@ -43,6 +47,19 @@ mod builtin_library {
     }
 
     use super::VirtualFile;
+
+    pub(crate) fn styles() -> Vec<&'static str> {
+        widget_library()
+            .iter()
+            .filter_map(|(style, directory)| {
+                if directory.iter().any(|f| f.path == "std-widgets.slint") {
+                    Some(*style)
+                } else {
+                    None
+                }
+            })
+            .collect()
+    }
 
     pub(crate) fn load_builtin_file(
         builtin_path: &std::path::Path,

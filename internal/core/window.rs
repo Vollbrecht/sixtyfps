@@ -35,7 +35,7 @@ pub trait PlatformWindow {
     fn set_rendering_notifier(
         &self,
         _callback: Box<dyn crate::api::RenderingNotifier>,
-    ) -> std::result::Result<(), crate::api::SetRenderingNotifierError> {
+    ) -> Result<(), crate::api::SetRenderingNotifierError> {
         Err(crate::api::SetRenderingNotifierError::Unsupported)
     }
 
@@ -578,6 +578,7 @@ pub type WindowRc = Rc<Window>;
 #[cfg(feature = "ffi")]
 pub mod ffi {
     #![allow(unsafe_code)]
+    #![allow(clippy::missing_safety_doc)]
 
     use super::*;
     use crate::api::{RenderingNotifier, RenderingState, SetRenderingNotifierError};

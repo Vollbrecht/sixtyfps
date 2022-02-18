@@ -1,14 +1,33 @@
 // Copyright © SixtyFPS GmbH <info@slint-ui.com>
 // SPDX-License-Identifier: GPL-3.0-only OR LicenseRef-Slint-commercial
 
-use super::Expression;
+use super::{EvaluationContext, Expression, ParentCtx};
 use crate::langtype::{NativeClass, Type};
+use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, HashMap};
 use std::num::NonZeroUsize;
 use std::rc::Rc;
 
 // Index in the `SubComponent::properties`
 pub type PropertyIndex = usize;
+
+#[derive(Debug, Clone, derive_more::Deref)]
+pub struct MutExpression(RefCell<Expression>);
+
+impl From<Expression> for MutExpression {
+    fn from(e: Expression) -> Self {
+        Self(e.into())
+    }
+}
+
+impl MutExpression {
+    pub fn visit_recursive(&self, visitor: &mut dyn FnMut(&Expression)) {
+        self.0.borrow().visit_recursive(visitor)
+    }
+    pub fn ty(&self, ctx: &dyn super::TypeResolutionContext) -> Type {
+        self.0.borrow().ty(ctx)
+    }
+}
 
 #[derive(Debug, Clone)]
 pub enum Animation {
@@ -19,10 +38,17 @@ pub enum Animation {
 
 #[derive(Debug, Clone)]
 pub struct BindingExpression {
-    pub expression: Expression,
+    pub expression: MutExpression,
     pub animation: Option<Animation>,
     /// When true, we can initialize the property with `set` otherwise, `set_binding` must be used
     pub is_constant: bool,
+    /// When true, the expression is a "state binding".  Despite the type of the expression being a integer
+    /// the property is of type StateInfo and the `set_state_binding` ned to be used on the property
+    pub is_state_info: bool,
+
+    /// The amount of time this binding is used
+    /// This property is only valid after the [`count_property_use`](super::optim_passes::count_property_use) pass
+    pub use_count: Cell<usize>,
 }
 
 #[derive(Debug)]
@@ -40,6 +66,9 @@ pub struct GlobalComponent {
     pub aliases: Vec<String>,
     /// True when this is a built-in global that does not need to be generated
     pub is_builtin: bool,
+
+    /// Analysis for each properties
+    pub prop_analysis: Vec<crate::object_tree::PropertyAnalysis>,
 }
 
 /// a Reference to a property, in the context of a SubComponent
@@ -55,10 +84,13 @@ pub enum PropertyReference {
     Global { global_index: usize, property_index: usize },
 }
 
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct Property {
     pub name: String,
     pub ty: Type,
+    /// The amount of time this property is used of another property
+    /// This property is only valid after the [`count_property_use`](super::optim_passes::count_property_use) pass
+    pub use_count: Cell<usize>,
 }
 
 #[derive(Debug, Clone)]
@@ -83,7 +115,7 @@ pub struct ListViewInfo {
 
 #[derive(Debug)]
 pub struct RepeatedElement {
-    pub model: Expression,
+    pub model: MutExpression,
     /// Within the sub_tree's root component
     pub index_prop: Option<PropertyIndex>,
     /// Within the sub_tree's root component
@@ -185,10 +217,19 @@ pub struct SubComponent {
     pub two_way_bindings: Vec<(PropertyReference, PropertyReference)>,
     pub const_properties: Vec<PropertyReference>,
     // Code that is run in the sub component constructor, after property initializations
-    pub init_code: Vec<Expression>,
+    pub init_code: Vec<MutExpression>,
 
-    pub layout_info_h: Expression,
-    pub layout_info_v: Expression,
+    pub layout_info_h: MutExpression,
+    pub layout_info_v: MutExpression,
+
+    pub prop_analysis: HashMap<PropertyReference, PropAnalysis>,
+}
+
+#[derive(Debug, Clone)]
+pub struct PropAnalysis {
+    /// Index in SubComponent::property_init for this property
+    pub property_init: Option<usize>,
+    pub analysis: crate::object_tree::PropertyAnalysis,
 }
 
 impl SubComponent {
@@ -239,6 +280,54 @@ pub struct PublicComponent {
     pub item_tree: ItemTree,
     pub sub_components: Vec<Rc<SubComponent>>,
     pub globals: Vec<GlobalComponent>,
+}
+
+impl PublicComponent {
+    pub fn for_each_sub_components<'a>(
+        &'a self,
+        visitor: &mut dyn FnMut(&'a SubComponent, &EvaluationContext<'_>),
+    ) {
+        fn visit_component<'a>(
+            root: &'a PublicComponent,
+            c: &'a SubComponent,
+            visitor: &mut dyn FnMut(&'a SubComponent, &EvaluationContext<'_>),
+            parent: Option<ParentCtx<'_>>,
+        ) {
+            let ctx = EvaluationContext::new_sub_component(root, c, (), parent);
+            visitor(c, &ctx);
+            for (idx, r) in c.repeated.iter().enumerate() {
+                visit_component(
+                    root,
+                    &r.sub_tree.root,
+                    visitor,
+                    Some(ParentCtx::new(&ctx, Some(idx))),
+                );
+            }
+            for x in &c.popup_windows {
+                visit_component(root, &x.root, visitor, Some(ParentCtx::new(&ctx, None)));
+            }
+        }
+        for c in &self.sub_components {
+            visit_component(self, c, visitor, None);
+        }
+        visit_component(self, &self.item_tree.root, visitor, None);
+    }
+
+    pub fn for_each_expression<'a>(
+        &'a self,
+        visitor: &mut dyn FnMut(&'a super::MutExpression, &EvaluationContext<'_>),
+    ) {
+        self.for_each_sub_components(&mut |sc, ctx| {
+            for e in &sc.init_code {
+                visitor(e, ctx);
+            }
+            for (_, e) in &sc.property_init {
+                visitor(&e.expression, ctx);
+            }
+            visitor(&sc.layout_info_h, ctx);
+            visitor(&sc.layout_info_v, ctx);
+        })
+    }
 }
 
 pub type PublicProperties = BTreeMap<String, (Type, PropertyReference)>;
