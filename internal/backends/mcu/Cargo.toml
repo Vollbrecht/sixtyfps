@@ -11,6 +11,7 @@ publish = false
 description = "Rendering backend for Slint for use on Microcontrollers"
 repository = "https://github.com/slint-ui/slint"
 homepage = "https://slint-ui.com"
+links = "i_slint_backend_mcu" # just so we can pass metadata to the slint build crate
 
 [lib]
 path = "lib.rs"
@@ -32,16 +33,17 @@ i-slint-common = { version = "=0.2.1", path = "../../../internal/common", defaul
 i-slint-core = { version = "=0.2.1", path = "../../../internal/core", default-features = false }
 
 const-field-offset = { version = "0.1", path = "../../../helper_crates/const-field-offset" }
-vtable = { version = "0.1", path = "../../../helper_crates/vtable" }
+vtable = { version = "0.1.6", path = "../../../helper_crates/vtable" }
 
 by_address = "1.0.4"
 derive_more = "0.99.5"
 embedded-graphics = "0.7.1"
 embedded-graphics-simulator = { version = "0.3.0", optional = true, default-features = false }
 euclid = { version = "0.22.1", default-features = false }
-femtovg = { version = "0.3.0", optional = true }
+femtovg = { version = "0.3.3", optional = true }
 glutin = { version = "0.28", default-features = false, optional = true, features = ["x11"] }
 imgref = { version = "1.6.1", optional = true }
+integer-sqrt = "0.1.5"
 once_cell = { version = "1.9", default-features = false, features = ["alloc", "atomic-polyfill"] }
 pin-weak = { version = "1", default-features = false }
 rgb = "0.8.27"
@@ -64,3 +66,6 @@ panic-probe = { version = "0.3.0", optional = true, features = ["print-defmt"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 cocoa = { version = "0.24.0" }
+
+[build-dependencies]
+cfg-if = "1.0.0"

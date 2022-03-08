@@ -21,8 +21,8 @@ When adding an item or a property, it needs to be kept in sync with different pl
 use crate::component::ComponentVTable;
 use crate::graphics::{Brush, Color, Point, Rect};
 use crate::input::{
-    FocusEvent, InputEventFilterResult, InputEventResult, KeyEvent, KeyEventResult, KeyEventType,
-    MouseEvent,
+    FocusEvent, FocusEventResult, InputEventFilterResult, InputEventResult, KeyEvent,
+    KeyEventResult, KeyEventType, MouseEvent,
 };
 use crate::item_rendering::CachedRenderingData;
 use crate::layout::{LayoutInfo, Orientation};
@@ -52,7 +52,7 @@ type ItemRendererRef<'a> = &'a mut dyn crate::item_rendering::ItemRenderer;
 
 /// Workarounds for cbindgen
 pub type VoidArg = ();
-type KeyEventArg = (KeyEvent,);
+pub type KeyEventArg = (KeyEvent,);
 type PointerEventArg = (PointerEvent,);
 type PointArg = (Point,);
 
@@ -126,8 +126,11 @@ pub struct ItemVTable {
         self_rc: &ItemRc,
     ) -> InputEventResult,
 
-    pub focus_event:
-        extern "C" fn(core::pin::Pin<VRef<ItemVTable>>, &FocusEvent, window: &WindowRc),
+    pub focus_event: extern "C" fn(
+        core::pin::Pin<VRef<ItemVTable>>,
+        &FocusEvent,
+        window: &WindowRc,
+    ) -> FocusEventResult,
 
     pub key_event: extern "C" fn(
         core::pin::Pin<VRef<ItemVTable>>,
@@ -186,7 +189,7 @@ impl ItemRc {
 }
 
 /// A Weak reference to an item that can be constructed from an ItemRc.
-#[derive(Default, Clone)]
+#[derive(Clone, Default)]
 #[repr(C)]
 pub struct ItemWeak {
     component: crate::component::ComponentWeak,
@@ -198,6 +201,14 @@ impl ItemWeak {
         self.component.upgrade().map(|c| ItemRc::new(c, self.index))
     }
 }
+
+impl PartialEq for ItemWeak {
+    fn eq(&self, other: &Self) -> bool {
+        VWeak::ptr_eq(&self.component, &other.component) && self.index == other.index
+    }
+}
+
+impl Eq for ItemWeak {}
 
 #[repr(C)]
 #[derive(FieldOffsets, Default, SlintElement)]
@@ -245,7 +256,9 @@ impl Item for Rectangle {
         KeyEventResult::EventIgnored
     }
 
-    fn focus_event(self: Pin<&Self>, _: &FocusEvent, _window: &WindowRc) {}
+    fn focus_event(self: Pin<&Self>, _: &FocusEvent, _window: &WindowRc) -> FocusEventResult {
+        FocusEventResult::FocusIgnored
+    }
 
     fn render(self: Pin<&Self>, backend: &mut ItemRendererRef) {
         (*backend).draw_rectangle(self)
@@ -312,7 +325,9 @@ impl Item for BorderRectangle {
         KeyEventResult::EventIgnored
     }
 
-    fn focus_event(self: Pin<&Self>, _: &FocusEvent, _window: &WindowRc) {}
+    fn focus_event(self: Pin<&Self>, _: &FocusEvent, _window: &WindowRc) -> FocusEventResult {
+        FocusEventResult::FocusIgnored
+    }
 
     fn render(self: Pin<&Self>, backend: &mut ItemRendererRef) {
         (*backend).draw_border_rectangle(self)
@@ -519,7 +534,9 @@ impl Item for TouchArea {
         KeyEventResult::EventIgnored
     }
 
-    fn focus_event(self: Pin<&Self>, _: &FocusEvent, _window: &WindowRc) {}
+    fn focus_event(self: Pin<&Self>, _: &FocusEvent, _window: &WindowRc) -> FocusEventResult {
+        FocusEventResult::FocusIgnored
+    }
 
     fn render(self: Pin<&Self>, _backend: &mut ItemRendererRef) {}
 }
@@ -616,7 +633,7 @@ impl Item for FocusScope {
         }
     }
 
-    fn focus_event(self: Pin<&Self>, event: &FocusEvent, _window: &WindowRc) {
+    fn focus_event(self: Pin<&Self>, event: &FocusEvent, _window: &WindowRc) -> FocusEventResult {
         match event {
             FocusEvent::FocusIn | FocusEvent::WindowReceivedFocus => {
                 self.has_focus.set(true);
@@ -625,6 +642,7 @@ impl Item for FocusScope {
                 self.has_focus.set(false);
             }
         }
+        FocusEventResult::FocusAccepted
     }
 
     fn render(self: Pin<&Self>, _backend: &mut ItemRendererRef) {}
@@ -696,7 +714,9 @@ impl Item for Clip {
         KeyEventResult::EventIgnored
     }
 
-    fn focus_event(self: Pin<&Self>, _: &FocusEvent, _window: &WindowRc) {}
+    fn focus_event(self: Pin<&Self>, _: &FocusEvent, _window: &WindowRc) -> FocusEventResult {
+        FocusEventResult::FocusIgnored
+    }
 
     fn render(self: Pin<&Self>, backend: &mut ItemRendererRef) {
         if self.clip() {
@@ -766,7 +786,9 @@ impl Item for Opacity {
         KeyEventResult::EventIgnored
     }
 
-    fn focus_event(self: Pin<&Self>, _: &FocusEvent, _window: &WindowRc) {}
+    fn focus_event(self: Pin<&Self>, _: &FocusEvent, _window: &WindowRc) -> FocusEventResult {
+        FocusEventResult::FocusIgnored
+    }
 
     fn render(self: Pin<&Self>, backend: &mut ItemRendererRef) {
         backend.apply_opacity(self.opacity());
@@ -830,7 +852,9 @@ impl Item for Rotate {
         KeyEventResult::EventIgnored
     }
 
-    fn focus_event(self: Pin<&Self>, _: &FocusEvent, _window: &WindowRc) {}
+    fn focus_event(self: Pin<&Self>, _: &FocusEvent, _window: &WindowRc) -> FocusEventResult {
+        FocusEventResult::FocusIgnored
+    }
 
     fn render(self: Pin<&Self>, backend: &mut ItemRendererRef) {
         (*backend).translate(self.origin_x(), self.origin_y());
@@ -919,7 +943,9 @@ impl Item for Flickable {
         KeyEventResult::EventIgnored
     }
 
-    fn focus_event(self: Pin<&Self>, _: &FocusEvent, _window: &WindowRc) {}
+    fn focus_event(self: Pin<&Self>, _: &FocusEvent, _window: &WindowRc) -> FocusEventResult {
+        FocusEventResult::FocusIgnored
+    }
 
     fn render(self: Pin<&Self>, backend: &mut ItemRendererRef) {
         let geometry = self.geometry();
@@ -1051,7 +1077,9 @@ impl Item for WindowItem {
         KeyEventResult::EventIgnored
     }
 
-    fn focus_event(self: Pin<&Self>, _: &FocusEvent, _window: &WindowRc) {}
+    fn focus_event(self: Pin<&Self>, _: &FocusEvent, _window: &WindowRc) -> FocusEventResult {
+        FocusEventResult::FocusIgnored
+    }
 
     fn render(self: Pin<&Self>, _backend: &mut ItemRendererRef) {}
 }
@@ -1150,7 +1178,9 @@ impl Item for BoxShadow {
         KeyEventResult::EventIgnored
     }
 
-    fn focus_event(self: Pin<&Self>, _: &FocusEvent, _window: &WindowRc) {}
+    fn focus_event(self: Pin<&Self>, _: &FocusEvent, _window: &WindowRc) -> FocusEventResult {
+        FocusEventResult::FocusIgnored
+    }
 
     fn render(self: Pin<&Self>, backend: &mut ItemRendererRef) {
         (*backend).draw_box_shadow(self)

@@ -12,6 +12,7 @@ use std::rc::Rc;
 #[cfg(target_arch = "wasm32")]
 pub fn embed_glyphs<'a>(
     _component: &Rc<Component>,
+    _scale_factor: f64,
     _all_docs: impl Iterator<Item = &'a crate::object_tree::Document> + 'a,
     _diag: &mut BuildDiagnostics,
 ) -> bool {
@@ -21,6 +22,7 @@ pub fn embed_glyphs<'a>(
 #[cfg(not(target_arch = "wasm32"))]
 pub fn embed_glyphs<'a>(
     component: &Rc<Component>,
+    scale_factor: f64,
     all_docs: impl Iterator<Item = &'a crate::object_tree::Document> + 'a,
     diag: &mut BuildDiagnostics,
 ) -> bool {
@@ -31,8 +33,26 @@ pub fn embed_glyphs<'a>(
     let mut fontdb = fontdb::Database::new();
     fontdb.load_system_fonts();
 
+    #[cfg(not(any(
+        target_family = "windows",
+        target_os = "macos",
+        target_os = "ios",
+        target_arch = "wasm32"
+    )))]
+    {
+        let default_sans_serif_family = {
+            let mut fontconfig_fallback_families = fontconfig::find_families("sans-serif");
+            if fontconfig_fallback_families.len() == 0 {
+                panic!("internal error: unable to resolve 'sans-serif' with fontconfig");
+            }
+            fontconfig_fallback_families.remove(0)
+        };
+        fontdb.set_sans_serif_family(default_sans_serif_family);
+    }
+
     let fallback_font = fontdb
-        .query(&fontdb::Query { families: &[fontdb::Family::SansSerif], ..Default::default() });
+        .query(&fontdb::Query { families: &[fontdb::Family::SansSerif], ..Default::default() })
+        .expect("internal error: Failed to locate default system font");
 
     // add custom fonts
     for doc in all_docs {
@@ -65,13 +85,12 @@ pub fn embed_glyphs<'a>(
     };
     let face_id = fontdb
         .query(&query)
-        .or_else(|| {
+        .unwrap_or_else(|| {
             if let Some(source_location) = source_location {
                 diag.push_warning_with_span(format!("could not find font that provides specified family, falling back to Sans-Serif"), source_location);
             }
             fallback_font
-        })
-        .expect("internal error: Unable to match any font for embedding");
+        });
 
     let (family_name, path) = {
         let face_info = fontdb
@@ -94,7 +113,7 @@ pub fn embed_glyphs<'a>(
             fontdue::FontSettings { collection_index: face_index, scale: 40. },
         )
         .expect("internal error: fontdb returned a font that ttf-parser/fontdue could not parse");
-                embed_font(family_name, font)
+                embed_font(family_name, font, scale_factor)
             })
             .unwrap();
 
@@ -120,13 +139,7 @@ pub fn embed_glyphs<'a>(
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-fn embed_font(family_name: String, font: fontdue::Font) -> BitmapFont {
-    let scale_factor = std::env::var("SLINT_SCALE_FACTOR")
-        .ok()
-        .and_then(|x| x.parse::<f64>().ok())
-        .filter(|f| *f > 0.)
-        .unwrap_or(1.);
-
+fn embed_font(family_name: String, font: fontdue::Font, scale_factor: f64) -> BitmapFont {
     let mut pixel_sizes = std::env::var("SLINT_FONT_SIZES")
         .map(|sizes_str| {
             sizes_str
@@ -191,3 +204,11 @@ fn embed_font(family_name: String, font: fontdue::Font) -> BitmapFont {
         glyphs,
     }
 }
+
+#[cfg(not(any(
+    target_family = "windows",
+    target_os = "macos",
+    target_os = "ios",
+    target_arch = "wasm32"
+)))]
+mod fontconfig;

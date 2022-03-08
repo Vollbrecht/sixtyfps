@@ -1,8 +1,9 @@
-# ![Slint](./logo/slint-logo-full-light.svg) 
+# ![Slint](./logo/slint-logo-full-light.svg)
 
 <table border="0" style="border:none"><tr><td valign="center">Formerly known as </td><td><img height="40" src="https://slint-ui.com/resources/logo.drawio.svg" style="vertical-alignment: middle"></td></tr></table>
 
 [![Build Status](https://github.com/slint-ui/slint/workflows/CI/badge.svg)](https://github.com/slint-ui/slint/actions)
+[![REUSE status](https://api.reuse.software/badge/github.com/slint-ui/slint)](https://api.reuse.software/info/github.com/slint-ui/slint)
 [![Discussions](https://img.shields.io/github/discussions/slint-ui/slint)](https://github.com/slint-ui/slint/discussions)
 
 Slint is a toolkit to efficiently develop fluid graphical user interfaces for any display: embedded devices and desktop applications. We support multiple programming languages, such as
@@ -115,12 +116,14 @@ Rendering backends and styles are configurable at compile time. Current there ar
 
 We have a few tools to help with the development of .slint files:
  - A [**LSP Server**](./tools/lsp) that adds things like auto-complete and live preview of the .slint files to many editors
- - It is bundled in a [**Visual Studio Code Extension**](./vscode_extension) accessible from the market place
+ - It is bundled in a [**Visual Studio Code Extension**](./editor/vscode) accessible from the market place
  - A [**slint-viewer**](./tools/viewer) tool which display the .slint files. With the `--auto-reload` argument, makes it easy to preview
    your UI as you are working it (when using the LSP preview is not possible)
  - An [**online editor**](https://slint-ui.com/editor) to try out .slint syntax without installing anything ([sources](./tools/online_editor))
  - An [**updater**](./tools/syntax_updater) to convert the .slint files from previous version to the newer version
  - An experimental [**Figma importer**](./tools/figma_import)
+
+Please check our [Editor README](./editor/README.md) for tips on how to configure your favorite editor to work well with Slint.
 
 ## Contributions
 

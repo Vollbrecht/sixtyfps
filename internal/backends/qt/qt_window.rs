@@ -12,8 +12,8 @@ use i_slint_core::graphics::{
 use i_slint_core::input::{KeyEvent, KeyEventType, MouseEvent};
 use i_slint_core::item_rendering::{CachedRenderingData, ItemRenderer};
 use i_slint_core::items::{
-    self, FillRule, ImageRendering, ItemRef, MouseCursor, PointerEventButton, TextOverflow,
-    TextWrap,
+    self, FillRule, ImageRendering, InputType, ItemRef, MouseCursor, PointerEventButton,
+    TextOverflow, TextWrap,
 };
 use i_slint_core::layout::Orientation;
 use i_slint_core::window::{PlatformWindow, PopupWindow, PopupWindowLocation, WindowRc};
@@ -136,6 +136,11 @@ cpp! {{
                 let pos = Point::new(pos.x as _, pos.y as _);
                 let delta = Point::new(delta.x as _, delta.y as _);
                 rust_window.mouse_event(MouseEvent::MouseWheel{pos, delta})
+            });
+        }
+        void leaveEvent(QEvent *) override {
+            rust!(Slint_mouseLeaveEvent [rust_window: &QtWindow as "void*"] {
+                rust_window.mouse_event(MouseEvent::MouseExit)
             });
         }
 
@@ -515,6 +520,13 @@ impl ItemRenderer for QtItemRenderer<'_> {
 
         let text = text_input.text();
         let mut string: qttypes::QString = text.as_str().into();
+
+        if let InputType::password = text_input.input_type() {
+            cpp! { unsafe [mut string as "QString"] {
+                string.fill(QChar(qApp->style()->styleHint(QStyle::SH_LineEdit_PasswordCharacter, nullptr, nullptr)));
+            }}
+        }
+
         let font: QFont =
             get_font(text_input.unresolved_font_request().merge(&self.default_font_properties));
         let flags = match text_input.horizontal_alignment() {
@@ -1443,9 +1455,14 @@ impl PlatformWindow for QtWindow {
             TextWrap::word_wrap => key_generated::Qt_TextFlag_TextWordWrap,
         };
         let single_line: bool = text_input.single_line();
-        cpp! { unsafe [font as "QFont", string as "QString", pos as "QPointF", flags as "int", rect as "QRectF", single_line as "bool"] -> usize as "size_t" {
+        let is_password: bool = matches!(text_input.input_type(), InputType::password);
+        cpp! { unsafe [font as "QFont", string as "QString", pos as "QPointF", flags as "int",
+                rect as "QRectF", single_line as "bool", is_password as "bool"] -> usize as "size_t" {
             // we need to do the \n replacement in a copy because the original need to be kept to know the utf8 offset
             auto copy = string;
+            if (is_password) {
+                copy.fill(QChar(qApp->style()->styleHint(QStyle::SH_LineEdit_PasswordCharacter, nullptr, nullptr)));
+            }
             if (!single_line) {
                 copy.replace(QChar('\n'), QChar::LineSeparator);
             }
@@ -1462,6 +1479,8 @@ impl PlatformWindow for QtWindow {
             } else {
                 cur = textLine.xToCursor(pos.x());
             }
+            if (cur < string.size() && string[cur].isLowSurrogate())
+                cur++;
             // convert to an utf8 pos;
             return QStringView(string).left(cur).toUtf8().size();
         }}

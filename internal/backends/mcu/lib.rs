@@ -19,6 +19,7 @@ use i_slint_core::unsafe_single_core;
 #[cfg(all(not(feature = "std"), feature = "unsafe_single_core"))]
 use i_slint_core::thread_local_ as thread_local;
 
+mod profiler;
 #[cfg(feature = "simulator")]
 mod simulator;
 
@@ -38,7 +39,7 @@ pub trait Devices {
         None
     }
     fn debug(&mut self, _: &str);
-    fn time(&mut self) -> core::time::Duration {
+    fn time(&self) -> core::time::Duration {
         core::time::Duration::ZERO
     }
 }
@@ -76,6 +77,7 @@ where
 }
 
 thread_local! { static DEVICES: RefCell<Option<Box<dyn Devices + 'static>>> = RefCell::new(None) }
+thread_local! { static PARTIAL_RENDERING_CACHE: RefCell<i_slint_core::item_rendering::PartialRenderingCache> = RefCell::new(Default::default()) }
 
 mod the_backend {
     use super::*;
@@ -89,7 +91,7 @@ mod the_backend {
     use i_slint_core::graphics::{Color, Point, Size};
     use i_slint_core::window::PlatformWindow;
     use i_slint_core::window::Window;
-    use i_slint_core::ImageInner;
+    use i_slint_core::{ImageInner, StaticTextures};
 
     thread_local! { static WINDOWS: RefCell<Option<Rc<McuWindow>>> = RefCell::new(None) }
 
@@ -101,9 +103,11 @@ mod the_backend {
 
     impl PlatformWindow for McuWindow {
         fn show(self: Rc<Self>) {
-            self.self_weak.upgrade().unwrap().set_scale_factor(
+            let w = self.self_weak.upgrade().unwrap();
+            w.set_scale_factor(
                 option_env!("SLINT_SCALE_FACTOR").and_then(|x| x.parse().ok()).unwrap_or(1.),
             );
+            w.scale_factor_property().set_constant();
             WINDOWS.with(|x| *x.borrow_mut() = Some(self))
         }
         fn hide(self: Rc<Self>) {
@@ -220,7 +224,14 @@ mod the_backend {
                 runtime_window.set_window_item_geometry(size.width as _, size.height as _);
                 let background =
                     crate::renderer::to_rgb888_color_discard_alpha(window.background_color.get());
-                crate::renderer::render_window_frame(runtime_window, background, &mut **devices);
+                PARTIAL_RENDERING_CACHE.with(|cache| {
+                    crate::renderer::render_window_frame(
+                        runtime_window,
+                        background,
+                        &mut **devices,
+                        &mut cache.borrow_mut(),
+                    )
+                });
             });
         }
     }
@@ -310,7 +321,7 @@ mod the_backend {
                     unimplemented!()
                 }
                 ImageInner::EmbeddedImage(buffer) => buffer.size(),
-                ImageInner::StaticTextures { size, .. } => *size,
+                ImageInner::StaticTextures(StaticTextures { original_size, .. }) => *original_size,
             }
         }
 
@@ -339,7 +350,6 @@ pub type NativeWidgets = ();
 pub type NativeGlobals = ();
 pub mod native_widgets {}
 pub const HAS_NATIVE_STYLE: bool = false;
-pub const IS_AVAILABLE: bool = true;
 
 #[cfg(feature = "simulator")]
 pub fn init_simulator() {

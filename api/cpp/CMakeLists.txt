@@ -74,6 +74,15 @@ define_cargo_feature(backend-gl-wayland "Enable the OpenGL ES 2.0 backend with w
 
 define_cargo_feature(backend-qt "Enable Qt based rendering backend" ON)
 
+if(SLINT_FEATURE_INTERPRETER)
+    if (SLINT_FEATURE_BACKEND_QT)
+        list(APPEND features rtti-qt)
+    endif()
+    if(SLINT_FEATURE_BACKEND_GL_ALL OR SLINT_FEATURE_BACKEND_GL_X11 OR SLINT_FEATURE_BACKEND_GL_WAYLAND)
+        list(APPEND features rtti-gl)
+    endif()
+endif()
+
 set_property(
     TARGET slint-cpp
     PROPERTY CORROSION_FEATURES
@@ -131,6 +140,7 @@ set(generated_headers
     ${CMAKE_CURRENT_BINARY_DIR}/generated_include/slint_color_internal.h
     ${CMAKE_CURRENT_BINARY_DIR}/generated_include/slint_pathdata_internal.h
     ${CMAKE_CURRENT_BINARY_DIR}/generated_include/slint_qt_internal.h
+    ${CMAKE_CURRENT_BINARY_DIR}/generated_include/slint_selector_internal.h
     ${CMAKE_CURRENT_BINARY_DIR}/generated_include/slint_backend_internal.h
     ${CMAKE_CURRENT_BINARY_DIR}/generated_include/slint_generated_public.h
     ${CMAKE_CURRENT_BINARY_DIR}/generated_include/slint_interpreter_internal.h
@@ -257,7 +267,7 @@ if(BUILD_TESTING)
     FetchContent_Declare(
         Catch2
         GIT_REPOSITORY https://github.com/catchorg/Catch2.git
-        GIT_TAG        v2.13.1
+        GIT_TAG        v2.13.8
     )
 
     FetchContent_MakeAvailable(Catch2)

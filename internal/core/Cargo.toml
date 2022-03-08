@@ -35,7 +35,7 @@ i-slint-common = { version = "=0.2.1", path = "../common" }
 i-slint-core-macros = { version = "=0.2.1", path = "../core-macros" }
 
 const-field-offset = { version = "0.1", path = "../../helper_crates/const-field-offset" }
-vtable = { version="0.1.1", path = "../../helper_crates/vtable" }
+vtable = { version="0.1.6", path = "../../helper_crates/vtable" }
 
 atomic-polyfill = { version = "0.1.5" }
 auto_enums = "0.7"
@@ -58,7 +58,7 @@ scoped-tls-hkt = { version = "0.1", optional = true }
 scopeguard =  { version = "1.1.0", default-features = false }
 slab = { version = "0.4.3", default-features = false }
 static_assertions = "1.1"
-strum = { version = "0.23.0", default-features = false, features = ["derive"] }
+strum = { version = "0.24.0", default-features = false, features = ["derive"] }
 unicode-segmentation = "1.8.0"
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
@@ -67,7 +67,7 @@ wasm-bindgen = { version = "0.2" }
 web_sys = { version = "0.3", package = "web-sys", features=["console", "CanvasRenderingContext2d", "TextMetrics", "HtmlSpanElement"] }
 
 [dev-dependencies]
-slint = { path = "../../api/rs/slint", default-features = false, features = ["std"] }
+slint = { path = "../../api/rs/slint", default-features = false, features = ["std", "compat-0-2-0"] }
 i-slint-backend-testing = { path="../backends/testing" }
 
 image = { version = "0.24.0", default-features = false, features = [ "png" ] }

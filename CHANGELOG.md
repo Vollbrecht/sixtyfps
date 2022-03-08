@@ -3,6 +3,16 @@ All notable changes to this project will be documented in this file.
 
 ## Unreleased
 
+### Added
+
+ - C++ interpreter API: added a `Value::Value(int)` constructor
+ - Globals Singleton may now refer to other global singletons
+ - Added `input-type` property to `TextInput` and `LineEdit` that allows for characters to be replaced in password fields
+
+### Fixed
+
+ - `TouchArea::has-hover` is now properly set to false when the mouse leaves the window.
+
 ## [0.2.0] - 2022-02-10
 
 This version changes some APIs in incompatible ways. For details how to migrate your application code, see the [C++ migration guide](api/cpp/docs/cpp_migration.md)

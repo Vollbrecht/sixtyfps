@@ -694,8 +694,8 @@ impl<C: RepeatedComponent> Default for Repeater<C> {
     fn default() -> Self {
         Repeater {
             inner: Default::default(),
-            model: Default::default(),
-            is_dirty: Default::default(),
+            model: Property::new_named(ModelRc::default(), "i_slint_core::Repeater::model"),
+            is_dirty: Property::new_named(false, "i_slint_core::Repeater::is_dirty"),
             listview_geometry_tracker: Default::default(),
             peer: Default::default(),
         }
@@ -732,8 +732,10 @@ impl<C: RepeatedComponent + 'static> Repeater<C> {
             });
 
             m.model_tracker().attach_peer(ModelPeer { inner: PinWeak::downgrade(peer.clone()) });
+            m
+        } else {
+            model.get()
         }
-        model.get()
     }
 
     /// Call this function to make sure that the model is updated.

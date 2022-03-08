@@ -147,7 +147,11 @@ pub fn generate(doc: &Document) -> TokenStream {
                     let data = embedded_file_tokens(path);
                     quote!(const #symbol: &'static [u8] = #data;)
                 }
-                crate::embedded_resources::EmbeddedResourcesKind::TextureData(crate::embedded_resources::Texture { data, format, rect, total_size: crate::embedded_resources::Size{width, height} }) => {
+                crate::embedded_resources::EmbeddedResourcesKind::TextureData(crate::embedded_resources::Texture {
+                    data, format, rect,
+                    total_size: crate::embedded_resources::Size{width, height},
+                    original_size: crate::embedded_resources::Size{width: unscaled_width, height: unscaled_height},
+                }) => {
                     let (r_x, r_y, r_w, r_h) = (rect.x(), rect.y(), rect.width(), rect.height());
                     let color = if let crate::embedded_resources::PixelFormat::AlphaMap([r, g, b]) = format {
                         quote!(slint::re_exports::Color::from_rgb_u8(#r, #g, #b))
@@ -155,8 +159,9 @@ pub fn generate(doc: &Document) -> TokenStream {
                         quote!(slint::re_exports::Color::from_argb_encoded(0))
                     };
                     quote!(
-                        const #symbol: slint::re_exports::ImageInner = slint::re_exports::ImageInner::StaticTextures {
+                        const #symbol: slint::re_exports::ImageInner = slint::re_exports::ImageInner::StaticTextures(&slint::re_exports::StaticTextures{
                             size: slint::re_exports::IntSize::new(#width as _, #height as _),
+                            original_size: slint::re_exports::IntSize::new(#unscaled_width as _, #unscaled_height as _),
                             data: Slice::from_slice(&[#(#data),*]),
                             textures: Slice::from_slice(&[
                                 slint::re_exports::StaticTexture {
@@ -166,7 +171,7 @@ pub fn generate(doc: &Document) -> TokenStream {
                                     index: 0,
                                 }
                             ])
-                        };
+                        });
                     )
                 },
                 crate::embedded_resources::EmbeddedResourcesKind::BitmapFontData(crate::embedded_resources::BitmapFont { family_name, character_map, units_per_em, ascent, descent, glyphs }) => {
@@ -262,7 +267,9 @@ fn generate_public_component(llr: &llr::PublicComponent) -> TokenStream {
 
         impl #public_component_id {
             pub fn new() -> Self {
-                Self(#inner_component_id::new())
+                let inner = #inner_component_id::new();
+                #(inner.globals.#global_names.clone().init(&inner);)*
+                Self(inner)
             }
 
             #property_and_callback_accessors
@@ -548,6 +555,12 @@ fn generate_sub_component(
     let mut item_names = vec![];
     let mut item_types = vec![];
 
+    #[cfg(slint_debug_property)]
+    init.push(quote!(
+        #(self_rc.#declared_property_vars.debug_name.replace(
+            concat!(stringify!(#inner_component_id), ".", stringify!(#declared_property_vars)).into());)*
+    ));
+
     for item in &component.items {
         if item.is_flickable_viewport {
             continue;
@@ -555,12 +568,23 @@ fn generate_sub_component(
         item_names.push(ident(&item.name));
         item_types.push(ident(&item.ty.class_name));
         #[cfg(slint_debug_property)]
-        for (prop, info) in &item.ty.properties {
-            if info.ty.is_property_type() && !prop.starts_with("viewport") && prop != "commands" {
-                let name = format!("{}::{}.{}", component.name, item.name, prop);
-                let elem_name = ident(&item.name);
-                let prop = ident(&prop);
-                init.push(quote!(self_rc.#elem_name.#prop.debug_name.replace(#name.into());));
+        {
+            let mut it = Some(&item.ty);
+            let elem_name = ident(&item.name);
+            while let Some(ty) = it {
+                for (prop, info) in &ty.properties {
+                    if info.ty.is_property_type()
+                        && !prop.starts_with("viewport")
+                        && prop != "commands"
+                    {
+                        let name = format!("{}::{}.{}", component.name, item.name, prop);
+                        let prop = ident(&prop);
+                        init.push(
+                            quote!(self_rc.#elem_name.#prop.debug_name.replace(#name.into());),
+                        );
+                    }
+                }
+                it = ty.parent.as_ref();
             }
         }
     }
@@ -668,12 +692,6 @@ fn generate_sub_component(
         sub_component_names.push(field_name);
         sub_component_types.push(sub_component_id);
     }
-
-    #[cfg(slint_debug_property)]
-    init.push(quote!(
-        #(self_rc.#declared_property_vars.debug_name.replace(
-            concat!(stringify!(#inner_component_id), ".", stringify!(#declared_property_vars)).into());)*
-    ));
 
     for (prop1, prop2) in &component.two_way_bindings {
         let p1 = access_member(prop1, &ctx);
@@ -807,11 +825,18 @@ fn generate_global(global: &llr::GlobalComponent, root: &llr::PublicComponent) -
     }
 
     let mut init = vec![];
+    let inner_component_id = format_ident!("Inner{}", ident(&global.name));
+
+    #[cfg(slint_debug_property)]
+    init.push(quote!(
+        #(self_rc.#declared_property_vars.debug_name.replace(
+            concat!(stringify!(#inner_component_id), ".", stringify!(#declared_property_vars)).into());)*
+    ));
 
     let ctx = EvaluationContext::new_global(
         root,
         global,
-        quote!(compilation_error("can't access root from global")),
+        quote!(_self.root.get().unwrap().upgrade().unwrap()),
     );
 
     for (property_index, expression) in global.init_values.iter().enumerate() {
@@ -840,8 +865,6 @@ fn generate_global(global: &llr::GlobalComponent, root: &llr::PublicComponent) -
         }
     }
 
-    let inner_component_id = format_ident!("Inner{}", ident(&global.name));
-
     let public_interface = global.exported.then(|| {
         let property_and_callback_accessors = public_api(&global.public_properties, quote!(self.0.as_ref()), &ctx);
         let public_component_id = ident(&global.name);
@@ -866,6 +889,7 @@ fn generate_global(global: &llr::GlobalComponent, root: &llr::PublicComponent) -
         )
     });
 
+    let root_component_id = self::inner_component_id(&root.item_tree.root);
     quote!(
         #[derive(slint::re_exports::FieldOffsets, Default)]
         #[const_field_offset(slint::re_exports::const_field_offset)]
@@ -874,14 +898,19 @@ fn generate_global(global: &llr::GlobalComponent, root: &llr::PublicComponent) -
         struct #inner_component_id {
             #(#declared_property_vars: slint::re_exports::Property<#declared_property_types>,)*
             #(#declared_callbacks: slint::re_exports::Callback<(#(#declared_callbacks_types,)*), #declared_callbacks_ret>,)*
+            root : slint::re_exports::OnceCell<slint::re_exports::VWeak<slint::re_exports::ComponentVTable, #root_component_id>>,
         }
 
         impl #inner_component_id {
             fn new() -> ::core::pin::Pin<slint::re_exports::Rc<Self>> {
-                let self_rc = slint::re_exports::Rc::pin(Self::default());
+                slint::re_exports::Rc::pin(Self::default())
+            }
+            fn init(self: ::core::pin::Pin<slint::re_exports::Rc<Self>>, root: &slint::re_exports::VRc<slint::re_exports::ComponentVTable, #root_component_id>) {
+                #![allow(unused)]
+                self.root.set(VRc::downgrade(root));
+                let self_rc = self;
                 let _self = self_rc.as_ref();
                 #(#init)*
-                self_rc
             }
         }
 

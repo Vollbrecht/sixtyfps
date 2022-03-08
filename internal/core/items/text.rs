@@ -11,8 +11,8 @@ Lookup the [`crate::items`] module documentation.
 use super::{Item, ItemConsts, ItemRc, PointArg, PointerEventButton, VoidArg};
 use crate::graphics::{Brush, Color, FontRequest, Rect};
 use crate::input::{
-    key_codes, FocusEvent, InputEventFilterResult, InputEventResult, KeyEvent, KeyEventResult,
-    KeyEventType, KeyboardModifiers, MouseEvent,
+    key_codes, FocusEvent, FocusEventResult, InputEventFilterResult, InputEventResult, KeyEvent,
+    KeyEventResult, KeyEventType, KeyboardModifiers, MouseEvent,
 };
 use crate::item_rendering::{CachedRenderingData, ItemRenderer};
 use crate::layout::{LayoutInfo, Orientation};
@@ -27,6 +27,23 @@ use i_slint_core_macros::*;
 
 #[cfg(not(feature = "std"))]
 use num_traits::float::Float;
+
+/// This enum defines the input type in a text input which for now only distinguishes a normal
+/// input from a password input
+#[derive(Copy, Clone, Debug, PartialEq, strum::EnumString, strum::Display)]
+#[repr(C)]
+#[allow(non_camel_case_types)]
+pub enum InputType {
+    /// This type is used for a normal text input
+    text,
+    /// This type is used for password inputs where the characters are represented as *'s
+    password,
+}
+impl Default for InputType {
+    fn default() -> Self {
+        Self::text
+    }
+}
 
 #[derive(Copy, Clone, Debug, PartialEq, strum::EnumString, strum::Display)]
 #[repr(C)]
@@ -174,7 +191,9 @@ impl Item for Text {
         KeyEventResult::EventIgnored
     }
 
-    fn focus_event(self: Pin<&Self>, _: &FocusEvent, _window: &WindowRc) {}
+    fn focus_event(self: Pin<&Self>, _: &FocusEvent, _window: &WindowRc) -> FocusEventResult {
+        FocusEventResult::FocusIgnored
+    }
 
     fn render(self: Pin<&Self>, backend: &mut &mut dyn ItemRenderer) {
         (*backend).draw_text(self)
@@ -233,6 +252,7 @@ pub struct TextInput {
     pub horizontal_alignment: Property<TextHorizontalAlignment>,
     pub vertical_alignment: Property<TextVerticalAlignment>,
     pub wrap: Property<TextWrap>,
+    pub input_type: Property<InputType>,
     pub letter_spacing: Property<f32>,
     pub x: Property<f32>,
     pub y: Property<f32>,
@@ -424,7 +444,7 @@ impl Item for TextInput {
         }
     }
 
-    fn focus_event(self: Pin<&Self>, event: &FocusEvent, window: &WindowRc) {
+    fn focus_event(self: Pin<&Self>, event: &FocusEvent, window: &WindowRc) -> FocusEventResult {
         match event {
             FocusEvent::FocusIn | FocusEvent::WindowReceivedFocus => {
                 self.has_focus.set(true);
@@ -432,13 +452,14 @@ impl Item for TextInput {
             }
             FocusEvent::FocusOut | FocusEvent::WindowLostFocus => {
                 self.has_focus.set(false);
-                self.hide_cursor()
+                self.hide_cursor();
             }
         }
+        FocusEventResult::FocusAccepted
     }
 
     fn render(self: Pin<&Self>, backend: &mut &mut dyn ItemRenderer) {
-        (*backend).draw_text_input(self)
+        (*backend).draw_text_input(self);
     }
 }
 

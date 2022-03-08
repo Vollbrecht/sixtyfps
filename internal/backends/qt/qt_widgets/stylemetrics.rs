@@ -12,7 +12,7 @@ struct StyleChangeListener : QWidget {
         auto ty = event->type();
         if (ty == QEvent::StyleChange || ty == QEvent::PaletteChange || ty == QEvent::FontChange) {
             rust!(Slint_style_change_event [nativeStyleMetrics: Pin<&NativeStyleMetrics> as "const void*"] {
-                nativeStyleMetrics.init();
+                nativeStyleMetrics.init_impl();
             });
         }
         return QWidget::event(event);
@@ -39,12 +39,14 @@ pub struct NativeStyleMetrics {
     pub placeholder_color: Property<Color>,
     pub placeholder_color_disabled: Property<Color>,
 
+    pub dark_style: Property<bool>,
+
     pub style_change_listener: core::cell::Cell<*const u8>,
 }
 
 impl const_field_offset::PinnedDrop for NativeStyleMetrics {
     fn drop(self: Pin<&mut Self>) {
-        slint_native_style_metrics_deinit(self);
+        native_style_metrics_deinit(self);
     }
 }
 
@@ -62,13 +64,17 @@ impl NativeStyleMetrics {
             textedit_text_color_disabled: Default::default(),
             placeholder_color: Default::default(),
             placeholder_color_disabled: Default::default(),
+            dark_style: Default::default(),
             style_change_listener: core::cell::Cell::new(core::ptr::null()),
         });
-        new.as_ref().init();
         new
     }
 
-    fn init(self: Pin<&Self>) {
+    pub fn init<T>(self: Pin<Rc<Self>>, _root: &T) {
+        self.as_ref().init_impl();
+    }
+
+    fn init_impl(self: Pin<&Self>) {
         if self.style_change_listener.get().is_null() {
             self.style_change_listener.set(cpp!(unsafe [self as "void*"] -> *const u8 as "void*"{
                 ensure_initialized();
@@ -96,7 +102,8 @@ impl NativeStyleMetrics {
         let window_background = cpp!(unsafe[] -> u32 as "QRgb" {
             return qApp->palette().color(QPalette::Window).rgba();
         });
-        self.window_background.set(Color::from_argb_encoded(window_background));
+        let window_background = Color::from_argb_encoded(window_background);
+        self.window_background.set(window_background);
         let default_text_color = cpp!(unsafe[] -> u32 as "QRgb" {
             return qApp->palette().color(QPalette::WindowText).rgba();
         });
@@ -127,24 +134,32 @@ impl NativeStyleMetrics {
             return qApp->palette().color(QPalette::Disabled, QPalette::PlaceholderText).rgba();
         });
         self.placeholder_color_disabled.set(Color::from_argb_encoded(placeholder_color_disabled));
+
+        self.dark_style.set(
+            (window_background.red() as u32
+                + window_background.green() as u32
+                + window_background.blue() as u32)
+                / 3
+                < 128,
+        );
     }
 }
 
 #[cfg(feature = "rtti")]
 impl i_slint_core::rtti::BuiltinGlobal for NativeStyleMetrics {
     fn new() -> Pin<Rc<Self>> {
-        NativeStyleMetrics::new()
+        let r = NativeStyleMetrics::new();
+        r.as_ref().init_impl();
+        r
     }
 }
 
-#[no_mangle]
-pub extern "C" fn slint_native_style_metrics_init(self_: Pin<&NativeStyleMetrics>) {
+pub fn native_style_metrics_init(self_: Pin<&NativeStyleMetrics>) {
     self_.style_change_listener.set(core::ptr::null()); // because the C++ code don't initialize it
-    self_.init();
+    self_.init_impl();
 }
 
-#[no_mangle]
-pub extern "C" fn slint_native_style_metrics_deinit(self_: Pin<&mut NativeStyleMetrics>) {
+pub fn native_style_metrics_deinit(self_: Pin<&mut NativeStyleMetrics>) {
     let scl = self_.style_change_listener.get();
     cpp!(unsafe [scl as "StyleChangeListener*"] { delete scl; });
     self_.style_change_listener.set(core::ptr::null());
