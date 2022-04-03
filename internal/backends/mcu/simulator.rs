@@ -200,11 +200,11 @@ impl PlatformWindow for SimulatorWindow {
         todo!()
     }
 
-    fn text_input_position_for_byte_offset(
+    fn text_input_cursor_rect_for_byte_offset(
         &self,
         _text_input: std::pin::Pin<&i_slint_core::items::TextInput>,
         _byte_offset: usize,
-    ) -> i_slint_core::graphics::Point {
+    ) -> i_slint_core::graphics::Rect {
         todo!()
     }
 
@@ -268,7 +268,7 @@ impl WinitWindow for SimulatorWindow {
             super::PARTIAL_RENDERING_CACHE.with(|cache| {
                 crate::renderer::render_window_frame(
                     runtime_window,
-                    background,
+                    background.into(),
                     &mut *display,
                     &mut cache.borrow_mut(),
                 );
@@ -338,6 +338,7 @@ impl i_slint_core::backend::Backend for SimulatorBackend {
 
     fn run_event_loop(&'static self, behavior: i_slint_core::backend::EventLoopQuitBehavior) {
         event_loop::run(behavior);
+        std::process::exit(0);
     }
 
     fn quit_event_loop(&'static self) {

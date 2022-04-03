@@ -41,11 +41,13 @@ pub fn ensure_window(
         states: Default::default(),
         transitions: Default::default(),
         child_of_layout: false,
+        has_popup_child: false,
         layout_info_prop: Default::default(),
         is_flickable_viewport: false,
         item_index: Default::default(),
         item_index_of_first_children: Default::default(),
         node: win_elem_mut.node.clone(),
+        inline_depth: 0,
     };
     let new_root = Rc::new(RefCell::new(new_root));
     win_elem_mut.children.push(new_root.clone());

@@ -42,15 +42,17 @@ fn create_repeater_components(component: &Rc<Component>) {
                 child_of_layout: elem.child_of_layout || is_listview.is_some(),
                 layout_info_prop: elem.layout_info_prop.take(),
                 is_flickable_viewport: elem.is_flickable_viewport,
+                has_popup_child: elem.has_popup_child,
                 item_index: Default::default(), // Not determined yet
                 item_index_of_first_children: Default::default(),
+                inline_depth: 0,
             })),
             parent_element,
             ..Component::default()
         });
 
         if let Some(listview) = is_listview {
-            if !comp.root_element.borrow().bindings.contains_key("height") {
+            if !comp.root_element.borrow().is_binding_set("height", false) {
                 let preferred = Expression::PropertyReference(NamedReference::new(
                     &comp.root_element,
                     "preferred-height",
@@ -60,7 +62,7 @@ fn create_repeater_components(component: &Rc<Component>) {
                     .bindings
                     .insert("height".into(), RefCell::new(preferred.into()));
             }
-            if !comp.root_element.borrow().bindings.contains_key("width") {
+            if !comp.root_element.borrow().is_binding_set("width", false) {
                 comp.root_element.borrow_mut().bindings.insert(
                     "width".into(),
                     RefCell::new(Expression::PropertyReference(listview.listview_width).into()),
@@ -77,6 +79,10 @@ fn create_repeater_components(component: &Rc<Component>) {
         create_repeater_components(&comp);
         elem.base_type = Type::Component(comp);
     });
+
+    for p in component.popup_windows.borrow().iter() {
+        create_repeater_components(&p.component);
+    }
 }
 
 /// Make sure that references to property within the repeated element actually point to the reference

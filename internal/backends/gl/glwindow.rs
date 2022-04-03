@@ -15,6 +15,7 @@ use crate::glcontext::OpenGLContext;
 use const_field_offset::FieldOffsets;
 use corelib::api::{GraphicsAPI, RenderingNotifier, RenderingState, SetRenderingNotifierError};
 use corelib::component::ComponentRc;
+use corelib::graphics::rendering_metrics_collector::RenderingMetricsCollector;
 use corelib::graphics::*;
 use corelib::input::KeyboardModifiers;
 use corelib::items::{ItemRef, MouseCursor};
@@ -40,12 +41,15 @@ pub struct GLWindow {
     // This cache only contains textures. The cache for decoded CPU side images is in crate::IMAGE_CACHE.
     pub(crate) texture_cache: RefCell<TextureCache>,
 
-    fps_counter: Option<Rc<FPSCounter>>,
+    rendering_metrics_collector: Option<Rc<RenderingMetricsCollector>>,
 
     rendering_notifier: RefCell<Option<Box<dyn RenderingNotifier>>>,
 
     #[cfg(target_arch = "wasm32")]
     canvas_id: String,
+
+    #[cfg(target_arch = "wasm32")]
+    virtual_keyboard_helper: RefCell<Option<super::wasm_input_helper::WasmInputHelper>>,
 }
 
 impl GLWindow {
@@ -66,10 +70,12 @@ impl GLWindow {
             currently_pressed_key_code: Default::default(),
             graphics_cache: Default::default(),
             texture_cache: Default::default(),
-            fps_counter: FPSCounter::new(),
+            rendering_metrics_collector: RenderingMetricsCollector::new(window_weak.clone()),
             rendering_notifier: Default::default(),
             #[cfg(target_arch = "wasm32")]
             canvas_id,
+            #[cfg(target_arch = "wasm32")]
+            virtual_keyboard_helper: Default::default(),
         })
     }
 
@@ -204,27 +210,19 @@ impl WinitWindow for GLWindow {
                 }
             }
 
-            let mut renderer = crate::GLItemRenderer {
-                canvas: window.canvas.as_ref().unwrap().clone(),
-                layer_images_to_delete_after_flush: Default::default(),
-                graphics_window: self.clone(),
+            let mut renderer = crate::GLItemRenderer::new(
+                window.canvas.as_ref().unwrap().clone(),
+                self.clone(),
                 scale_factor,
-                state: vec![crate::State {
-                    scissor: Rect::new(
-                        Point::default(),
-                        Size::new(size.width as f32, size.height as f32) / scale_factor,
-                    ),
-                    global_alpha: 1.,
-                    layer: None,
-                }],
-            };
+                size,
+            );
 
             for (component, origin) in components {
                 corelib::item_rendering::render_component_items(component, &mut renderer, *origin);
             }
 
-            if let Some(fps_counter) = &self.fps_counter {
-                fps_counter.measure_frame_rendered(&mut renderer);
+            if let Some(collector) = &self.rendering_metrics_collector {
+                collector.measure_frame_rendered(&mut renderer);
             }
 
             renderer.canvas.borrow_mut().flush();
@@ -279,6 +277,11 @@ impl WinitWindow for GLWindow {
                 );
             }
         };
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    fn input_method_focused(&self) -> bool {
+        self.virtual_keyboard_helper.borrow().as_ref().map_or(false, |h| h.has_focus())
     }
 }
 
@@ -463,7 +466,7 @@ impl PlatformWindow for GLWindow {
         );
         let id = platform_window.id();
 
-        if let Some(fps_counter) = &self.fps_counter {
+        if let Some(collector) = &self.rendering_metrics_collector {
             cfg_if::cfg_if! {
                 if #[cfg(target_arch = "wasm32")] {
                     let winsys = "HTML Canvas";
@@ -495,7 +498,7 @@ impl PlatformWindow for GLWindow {
                 }
             }
 
-            fps_counter.start(&format!("GL backend (windowing system: {})", winsys));
+            collector.start(&format!("GL backend (windowing system: {})", winsys));
         }
 
         drop(platform_window);
@@ -645,20 +648,26 @@ impl PlatformWindow for GLWindow {
         }
     }
 
-    fn text_input_position_for_byte_offset(
+    fn text_input_cursor_rect_for_byte_offset(
         &self,
         text_input: Pin<&corelib::items::TextInput>,
         byte_offset: usize,
-    ) -> Point {
+    ) -> Rect {
         let scale_factor = self.self_weak.upgrade().unwrap().scale_factor();
         let text = text_input.text();
+
+        let font_size = text_input
+            .unresolved_font_request()
+            .merge(&self.default_font_properties())
+            .pixel_size
+            .unwrap_or(super::fonts::DEFAULT_FONT_SIZE);
 
         let mut result = Point::default();
 
         let width = text_input.width() * scale_factor;
         let height = text_input.height() * scale_factor;
         if width <= 0. || height <= 0. {
-            return result;
+            return Rect::new(result, Size::new(1.0, font_size));
         }
 
         let font = crate::fonts::FONT_CACHE.with(|cache| {
@@ -683,7 +692,7 @@ impl PlatformWindow for GLWindow {
                 if (start..=(start + line_text.len())).contains(&byte_offset) {
                     for glyph in &metrics.glyphs {
                         if glyph.byte_index == (byte_offset - start) {
-                            result = line_pos + euclid::vec2(glyph.x, glyph.y);
+                            result = line_pos + euclid::vec2(glyph.x, 0.0);
                             return;
                         }
                     }
@@ -694,7 +703,25 @@ impl PlatformWindow for GLWindow {
             },
         );
 
-        result / scale_factor
+        Rect::new(result / scale_factor, Size::new(1.0, font_size))
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    fn show_virtual_keyboard(&self, _it: corelib::items::InputType) {
+        let mut vkh = self.virtual_keyboard_helper.borrow_mut();
+        let h = vkh.get_or_insert_with(|| {
+            let canvas =
+                self.borrow_mapped_window().unwrap().opengl_context.html_canvas_element().clone();
+            super::wasm_input_helper::WasmInputHelper::new(self.self_weak.clone(), canvas)
+        });
+        h.show();
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    fn hide_virtual_keyboard(&self) {
+        if let Some(h) = &*self.virtual_keyboard_helper.borrow() {
+            h.hide()
+        }
     }
 
     fn as_any(&self) -> &dyn std::any::Any {

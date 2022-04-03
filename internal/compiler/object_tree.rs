@@ -173,7 +173,7 @@ impl Document {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct PopupWindow {
     pub component: Rc<Component>,
     pub x: NamedReference,
@@ -458,11 +458,18 @@ pub struct Element {
     /// true if this Element is the fake Flickable viewport
     pub is_flickable_viewport: bool,
 
+    /// true if this Element may have a popup as child meaning it cannot be optimized
+    /// because the popup references it.
+    pub has_popup_child: bool,
+
     /// This is the component-local index of this item in the item tree array.
     /// It is generated after the last pass and before the generators run.
     pub item_index: once_cell::unsync::OnceCell<usize>,
     /// the index of the first children in the tree, set with item_index
     pub item_index_of_first_children: once_cell::unsync::OnceCell<usize>,
+
+    /// How many times the element was inlined
+    pub inline_depth: i32,
 
     /// The AST node, if available
     pub node: Option<syntax_nodes::Element>,
@@ -674,17 +681,7 @@ impl Element {
         for prop_decl in node.PropertyDeclaration() {
             let prop_type = prop_decl
                 .Type()
-                .map(|type_node| {
-                    let prop_type = type_from_node(type_node.clone(), diag, tr);
-
-                    if prop_type != Type::Invalid && !prop_type.is_property_type() {
-                        diag.push_error(
-                            format!("'{}' is not a valid property type", prop_type),
-                            &type_node,
-                        );
-                    }
-                    prop_type
-                })
+                .map(|type_node| type_from_node(type_node.clone(), diag, tr))
                 // Type::Void is used for two way bindings without type specified
                 .unwrap_or(Type::InferredProperty);
 
@@ -1253,6 +1250,8 @@ pub fn type_from_node(
 
         if prop_type == Type::Invalid {
             diag.push_error(format!("Unknown type '{}'", qualified_type), &qualified_type_node);
+        } else if !prop_type.is_property_type() {
+            diag.push_error(format!("'{}' is not a valid type", prop_type), &qualified_type_node);
         }
         prop_type
     } else if let Some(object_node) = node.ObjectType() {

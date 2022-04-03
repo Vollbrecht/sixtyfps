@@ -17,6 +17,11 @@ These properties are valid on all visible items
   children with transparency. 0 is fully transparent (invisible), and 1 is fully opaque. (default: 1)
 * **`visible`** (*bool*): When set to `false`, the element and all his children will not be drawn
   and not react to mouse input (default: `true`)
+* **`cache-rendering-hint`** (*bool*): When set to `true`, this provides a hint
+  to the renderer to cache the contents of the element and all the children into an intermediate
+  cached layer. For complex sub-trees that rarely change this may speed up the rendering, at the
+  expense of increased memory consumption. Not all rendering backends support this, so this is
+  merely a hint. (default: `false`)
 * **`dialog-button-role`** (*enum DialogButtonRole*): Specify that this is a button in a `Dialog`.
 
 
@@ -155,6 +160,8 @@ An Image can be used to represent an image loaded from an image file.
 
 ```slint
 Example := Window {
+    width: 100px;
+    height: 100px;
     VerticalLayout {
         Image {
             source: @image-url("https://slint-ui.com/logo/slint-logo-full-light.svg");
@@ -172,10 +179,15 @@ Scaled while preserving the aspect ratio:
 
 ```slint
 Example := Window {
-    Image {
-        source: @image-url("https://slint-ui.com/logo/slint-logo-full-light.svg");
-        width: 270px;
-        // implicit default, preserving aspect ratio: height: self.width * natural_height / natural_width;
+    width: 100px;
+    height: 150px;
+    VerticalLayout {
+        Image {
+            source: @image-url("https://slint-ui.com/logo/slint-logo-full-light.svg");
+            width: 100px;
+            // implicit default, preserving aspect ratio:
+            // height: self.width * natural_height / natural_width;
+        }
     }
 }
 ```
@@ -479,6 +491,8 @@ or it will be mapped to a private unicode character. The mapping of these non-pr
 
 ```slint
 Example := Window {
+    width: 100px;
+    height: 100px;
     forward-focus: my-key-handler;
     my-key-handler := FocusScope {
         key-pressed(event) => {

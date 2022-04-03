@@ -1,6 +1,8 @@
 // Copyright © SixtyFPS GmbH <info@slint-ui.com>
 // SPDX-License-Identifier: GPL-3.0-only OR LicenseRef-Slint-commercial
 
+// cSpell: ignore sharedvector textlayout
+
 #![doc = include_str!("README.md")]
 #![doc(html_logo_url = "https://slint-ui.com/logo/slint-logo-square-light.svg")]
 #![deny(unsafe_code)]
@@ -68,6 +70,7 @@ pub mod component;
 pub(crate) mod flickable;
 pub mod graphics;
 pub mod input;
+pub mod item_focus;
 pub mod item_rendering;
 pub mod item_tree;
 pub mod items;
@@ -83,6 +86,9 @@ pub mod window;
 
 #[cfg(feature = "rtti")]
 pub mod rtti;
+
+#[cfg(feature = "text_layout")]
+pub mod textlayout;
 
 #[doc(inline)]
 pub use string::SharedString;

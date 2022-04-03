@@ -7,9 +7,7 @@
     [PlatformWindow] trait used by the generated code and the run-time to change
     aspects of windows on the screen.
 */
-use corelib::component::ComponentRc;
 use corelib::items::PointerEventButton;
-use corelib::layout::Orientation;
 use i_slint_core as corelib;
 
 use corelib::graphics::Point;
@@ -71,24 +69,20 @@ pub trait WinitWindow: PlatformWindow {
                 } else {
                     None
                 });
+                winit_window.set_resizable(min_width < max_width || min_height < max_height);
                 self.set_constraints((constraints_horizontal, constraints_vertical));
 
                 #[cfg(target_arch = "wasm32")]
                 {
                     // set_max_inner_size / set_min_inner_size don't work on wasm, so apply the size manually
-                    let existing_size = winit_window.inner_size();
-                    if !(min_width..=max_width).contains(&(existing_size.width as f32))
-                        || !(min_height..=max_height).contains(&(existing_size.height as f32))
+                    let existing_size: winit::dpi::LogicalSize<f32> =
+                        winit_window.inner_size().to_logical(sf as f64);
+                    if !(min_width..=max_width).contains(&(existing_size.width))
+                        || !(min_height..=max_height).contains(&(existing_size.height))
                     {
                         let new_size = winit::dpi::LogicalSize::new(
-                            existing_size
-                                .width
-                                .min(max_width.ceil() as u32)
-                                .max(min_width.ceil() as u32),
-                            existing_size
-                                .height
-                                .min(max_height.ceil() as u32)
-                                .max(min_height.ceil() as u32),
+                            existing_size.width.min(max_width).max(min_width),
+                            existing_size.height.min(max_height).max(min_height),
                         );
                         winit_window.set_inner_size(new_size);
                     }
@@ -105,13 +99,14 @@ pub trait WinitWindow: PlatformWindow {
         let title = window_item.title();
         let no_frame = window_item.no_frame();
         let icon = window_item.icon();
-        let width = window_item.width();
-        let height = window_item.height();
+        let mut width = window_item.width();
+        let mut height = window_item.height();
 
         self.set_background_color(background);
         self.set_icon(icon);
 
-        let mut size: winit::dpi::LogicalSize<f64> = Default::default();
+        let mut must_resize = false;
+
         self.with_window_handle(&mut |winit_window| {
             winit_window.set_title(&title);
             if no_frame && winit_window.fullscreen().is_none() {
@@ -119,54 +114,39 @@ pub trait WinitWindow: PlatformWindow {
             } else {
                 winit_window.set_decorations(true);
             }
-            size =
-                winit_window.inner_size().to_logical(self.runtime_window().scale_factor() as f64);
-        });
 
-        let mut must_resize = false;
-        let mut resizable = None;
-        let mut w = width;
-        let mut h = height;
-        if (size.width as f32 - w).abs() < 1. || (size.height as f32 - h).abs() < 1. {
-            return;
-        }
-        if w <= 0. || h <= 0. {
-            if let Some(component_rc) = self.runtime_window().try_component() {
-                let component = ComponentRc::borrow_pin(&component_rc);
-                let hor_info = component.as_ref().layout_info(Orientation::Horizontal);
-                if w <= 0. {
-                    w = hor_info.preferred_bounded();
-                    must_resize = true;
-                }
-                let ver_info = component.as_ref().layout_info(Orientation::Vertical);
-                if h <= 0. {
-                    h = ver_info.preferred_bounded();
-                    must_resize = true;
-                }
-                resizable = Some(hor_info.min != hor_info.max && ver_info.min != ver_info.max);
+            let existing_size =
+                winit_window.inner_size().to_logical(self.runtime_window().scale_factor() as f64);
+
+            if width <= 0. {
+                width = existing_size.width;
+                must_resize = true;
             }
-        };
-        if w > 0. {
-            size.width = w as _;
-        }
-        if h > 0. {
-            size.height = h as _;
-        }
-        self.with_window_handle(&mut |winit_window| {
-            // If we're in fullscreen state, don't try to resize the window but maintain the surface
-            // size we've been assigned to from the windowing system. Weston/Wayland don't like it
-            // when we create a surface that's bigger than the screen due to constraints (#532).
-            if winit_window.fullscreen().is_none() {
-                winit_window.set_inner_size(size);
-                if let Some(resizable) = resizable {
-                    winit_window.set_resizable(resizable)
+            if height <= 0. {
+                height = existing_size.height;
+                must_resize = true;
+            }
+
+            if (existing_size.width as f32 - width).abs() > 1.
+                || (existing_size.height as f32 - height).abs() > 1.
+            {
+                // If we're in fullscreen state, don't try to resize the window but maintain the surface
+                // size we've been assigned to from the windowing system. Weston/Wayland don't like it
+                // when we create a surface that's bigger than the screen due to constraints (#532).
+                if winit_window.fullscreen().is_none() {
+                    winit_window.set_inner_size(winit::dpi::LogicalSize::new(width, height));
                 }
             }
         });
 
         if must_resize {
-            self.runtime_window().set_window_item_geometry(size.width as _, size.height as _)
+            self.runtime_window().set_window_item_geometry(width as _, height as _)
         }
+    }
+
+    /// Return true if the proxy element used for input method has the focus
+    fn input_method_focused(&self) -> bool {
+        false
     }
 }
 
@@ -300,6 +280,10 @@ pub enum CustomEvent {
     /// web for example to request an animation frame.
     #[cfg(target_arch = "wasm32")]
     RedrawAllWindows,
+    /// On wasm request_redraw doesn't wake the event loop, so we need to manually send an event
+    /// so that the event loop can run
+    #[cfg(target_arch = "wasm32")]
+    WakeEventLoopWorkaround,
     UpdateWindowProperties(winit::window::WindowId),
     UserEvent(Box<dyn FnOnce() + Send>),
     Exit,
@@ -310,6 +294,8 @@ impl std::fmt::Debug for CustomEvent {
         match self {
             #[cfg(target_arch = "wasm32")]
             Self::RedrawAllWindows => write!(f, "RedrawAllWindows"),
+            #[cfg(target_arch = "wasm32")]
+            Self::WakeEventLoopWorkaround => write!(f, "WakeEventLoopWorkaround"),
             Self::UpdateWindowProperties(e) => write!(f, "UpdateWindowProperties({:?})", e),
             Self::UserEvent(_) => write!(f, "UserEvent"),
             Self::Exit => write!(f, "Exit"),
@@ -317,6 +303,7 @@ impl std::fmt::Debug for CustomEvent {
     }
 }
 
+#[cfg(target_arch = "wasm32")]
 fn redraw_all_windows() {
     let all_windows_weak =
         ALL_WINDOWS.with(|windows| windows.borrow().values().cloned().collect::<Vec<_>>());
@@ -375,19 +362,20 @@ fn process_window_event(
             runtime_window.set_window_item_geometry(size.width, size.height);
         }
         WindowEvent::CloseRequested => {
-            window.hide();
-            match quit_behavior {
-                corelib::backend::EventLoopQuitBehavior::QuitOnLastWindowClosed => {
-                    let window_count = ALL_WINDOWS.with(|windows| windows.borrow().len());
-                    if window_count == 0 {
-                        *control_flow = winit::event_loop::ControlFlow::Exit;
+            if runtime_window.request_close() {
+                window.hide();
+                match quit_behavior {
+                    corelib::backend::EventLoopQuitBehavior::QuitOnLastWindowClosed => {
+                        let window_count = ALL_WINDOWS.with(|windows| windows.borrow().len());
+                        if window_count == 0 {
+                            *control_flow = winit::event_loop::ControlFlow::Exit;
+                        }
                     }
+                    corelib::backend::EventLoopQuitBehavior::QuitOnlyExplicitly => {}
                 }
-                corelib::backend::EventLoopQuitBehavior::QuitOnlyExplicitly => {}
             }
         }
         WindowEvent::ReceivedCharacter(ch) => {
-            corelib::animations::update_animations();
             // On Windows, X11 and Wayland sequences like Ctrl+C will send a ReceivedCharacter after the pressed keyboard input event,
             // with a control character. We choose not to forward those but try to use the current key code instead.
             //
@@ -417,13 +405,13 @@ fn process_window_event(
             runtime_window.process_key_input(&event);
         }
         WindowEvent::Focused(have_focus) => {
+            let have_focus = have_focus || window.input_method_focused();
             // We don't render popups as separate windows yet, so treat
             // focus to be the same as being active.
             runtime_window.set_active(have_focus);
             runtime_window.set_focus(have_focus);
         }
         WindowEvent::KeyboardInput { ref input, .. } => {
-            corelib::animations::update_animations();
             window.currently_pressed_key_code().set(match input.state {
                 winit::event::ElementState::Pressed => input.virtual_keycode,
                 _ => None,
@@ -452,7 +440,6 @@ fn process_window_event(
             window.current_keyboard_modifiers().set(modifiers);
         }
         WindowEvent::CursorMoved { position, .. } => {
-            corelib::animations::update_animations();
             let position = position.to_logical(runtime_window.scale_factor() as f64);
             *cursor_pos = euclid::point2(position.x, position.y);
             runtime_window.process_mouse_input(MouseEvent::MouseMoved { pos: *cursor_pos });
@@ -460,13 +447,11 @@ fn process_window_event(
         WindowEvent::CursorLeft { .. } => {
             // On the html canvas, we don't get the mouse move or release event when outside the canvas. So we have no choice but canceling the event
             if cfg!(target_arch = "wasm32") || !*pressed {
-                corelib::animations::update_animations();
                 *pressed = false;
                 runtime_window.process_mouse_input(MouseEvent::MouseExit);
             }
         }
         WindowEvent::MouseWheel { delta, .. } => {
-            corelib::animations::update_animations();
             let delta = match delta {
                 winit::event::MouseScrollDelta::LineDelta(lx, ly) => {
                     euclid::point2(lx * 60., ly * 60.)
@@ -479,7 +464,6 @@ fn process_window_event(
             runtime_window.process_mouse_input(MouseEvent::MouseWheel { pos: *cursor_pos, delta });
         }
         WindowEvent::MouseInput { state, button, .. } => {
-            corelib::animations::update_animations();
             let button = match button {
                 winit::event::MouseButton::Left => PointerEventButton::left,
                 winit::event::MouseButton::Right => PointerEventButton::right,
@@ -499,7 +483,6 @@ fn process_window_event(
             runtime_window.process_mouse_input(ev);
         }
         WindowEvent::Touch(touch) => {
-            corelib::animations::update_animations();
             let location = touch.location.to_logical(runtime_window.scale_factor() as f64);
             let pos = euclid::point2(location.x, location.y);
             let ev = match touch.phase {
@@ -576,7 +559,6 @@ pub fn run(quit_behavior: i_slint_core::backend::EventLoopQuitBehavior) {
                 }
 
                 winit::event::Event::RedrawRequested(id) => {
-                    corelib::animations::update_animations();
                     if let Some(window) = window_by_id(id) {
                         window.draw();
                     }
@@ -600,6 +582,16 @@ pub fn run(quit_behavior: i_slint_core::backend::EventLoopQuitBehavior) {
                 winit::event::Event::UserEvent(CustomEvent::RedrawAllWindows) => {
                     redraw_all_windows()
                 }
+
+                #[cfg(target_arch = "wasm32")]
+                winit::event::Event::UserEvent(CustomEvent::WakeEventLoopWorkaround) => {
+                    *control_flow = winit::event_loop::ControlFlow::Poll;
+                }
+
+                winit::event::Event::MainEventsCleared => {
+                    corelib::timers::TimerList::maybe_activate_timers();
+                    corelib::animations::update_animations();
+                }
                 _ => (),
             }
 
@@ -608,10 +600,7 @@ pub fn run(quit_behavior: i_slint_core::backend::EventLoopQuitBehavior) {
                     .with(|driver| driver.has_active_animations())
             {
                 *control_flow = ControlFlow::Poll;
-                redraw_all_windows()
             }
-
-            corelib::timers::TimerList::maybe_activate_timers();
 
             if *control_flow == winit::event_loop::ControlFlow::Wait {
                 if let Some(next_timer) = corelib::timers::TimerList::next_timeout() {

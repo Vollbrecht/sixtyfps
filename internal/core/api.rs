@@ -101,6 +101,21 @@ impl From<WindowRc> for Window {
     }
 }
 
+/// This enum describes whether a Window is allowed to be hidden when the user tries to close the window.
+/// It is the return type of the callback provided to [Window::on_close_requested].
+#[derive(Copy, Clone, Debug, PartialEq)]
+#[repr(C)]
+pub enum CloseRequestResponse {
+    HideWindow,
+    KeepWindowShown,
+}
+
+impl Default for CloseRequestResponse {
+    fn default() -> Self {
+        Self::HideWindow
+    }
+}
+
 impl Window {
     /// Registers the window with the windowing system in order to make it visible on the screen.
     pub fn show(&self) {
@@ -119,6 +134,12 @@ impl Window {
         callback: impl FnMut(RenderingState, &GraphicsAPI) + 'static,
     ) -> Result<(), SetRenderingNotifierError> {
         self.0.set_rendering_notifier(Box::new(callback))
+    }
+
+    /// This function allows registering a callback that's invoked when the user tries to close a window.
+    /// The callback has to return a [CloseRequestResponse].
+    pub fn on_close_requested(&self, callback: impl FnMut() -> CloseRequestResponse + 'static) {
+        self.0.on_close_requested(callback);
     }
 
     /// This function issues a request to the windowing system to redraw the contents of the window.

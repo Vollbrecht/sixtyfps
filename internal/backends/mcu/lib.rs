@@ -10,7 +10,6 @@ extern crate alloc;
 
 use alloc::boxed::Box;
 use core::cell::RefCell;
-use embedded_graphics::pixelcolor::Rgb888;
 use embedded_graphics::prelude::*;
 
 #[cfg(all(not(feature = "std"), feature = "unsafe_single_core"))]
@@ -32,9 +31,13 @@ mod renderer;
 
 use lengths::*;
 
+/// The Pixel type of the backing store
+/// TODO: make it configurable
+pub type TargetPixel = embedded_graphics::pixelcolor::Rgb565;
+
 pub trait Devices {
     fn screen_size(&self) -> PhysicalSize;
-    fn fill_region(&mut self, region: PhysicalRect, pixels: &[Rgb888]);
+    fn fill_region(&mut self, region: PhysicalRect, pixels: &[TargetPixel]);
     fn read_touch_event(&mut self) -> Option<i_slint_core::input::MouseEvent> {
         None
     }
@@ -47,14 +50,14 @@ pub trait Devices {
 impl<T: embedded_graphics::draw_target::DrawTarget> crate::Devices for T
 where
     T::Error: core::fmt::Debug,
-    T::Color: core::convert::From<embedded_graphics::pixelcolor::Rgb888>,
+    T::Color: core::convert::From<TargetPixel>,
 {
     fn screen_size(&self) -> PhysicalSize {
         let s = self.bounding_box().size;
         PhysicalSize::new(s.width as i16, s.height as i16)
     }
 
-    fn fill_region(&mut self, region: PhysicalRect, pixels: &[Rgb888]) {
+    fn fill_region(&mut self, region: PhysicalRect, pixels: &[TargetPixel]) {
         self.color_converted()
             .fill_contiguous(
                 &embedded_graphics::primitives::Rectangle::new(
@@ -68,11 +71,16 @@ where
 
     fn debug(&mut self, text: &str) {
         use embedded_graphics::{
-            mono_font::{ascii::FONT_6X10, MonoTextStyle},
+            mono_font::{ascii, MonoTextStyle},
             text::Text,
         };
-        let style = MonoTextStyle::new(&FONT_6X10, Rgb888::RED.into());
-        Text::new(text, Point::new(20, 30), style).draw(self).unwrap();
+        let style = MonoTextStyle::new(&ascii::FONT_8X13, TargetPixel::RED.into());
+        thread_local! { static LINE: core::cell::Cell<i16>  = core::cell::Cell::new(0) }
+        LINE.with(|l| {
+            let line = (l.get() + 1) % (self.screen_size().height / 13 - 2);
+            l.set(line);
+            Text::new(text, Point::new(3, (1 + line) as i32 * 13), style).draw(self).unwrap();
+        });
     }
 }
 
@@ -88,7 +96,7 @@ mod the_backend {
     use core::cell::{Cell, RefCell};
     use core::pin::Pin;
     use i_slint_core::component::ComponentRc;
-    use i_slint_core::graphics::{Color, Point, Size};
+    use i_slint_core::graphics::{Color, Point, Rect, Size};
     use i_slint_core::window::PlatformWindow;
     use i_slint_core::window::Window;
     use i_slint_core::{ImageInner, StaticTextures};
@@ -159,11 +167,11 @@ mod the_backend {
         ) -> usize {
             0
         }
-        fn text_input_position_for_byte_offset(
+        fn text_input_cursor_rect_for_byte_offset(
             &self,
             _text_input: Pin<&i_slint_core::items::TextInput>,
             _byte_offset: usize,
-        ) -> Point {
+        ) -> Rect {
             Default::default()
         }
         fn as_any(&self) -> &dyn core::any::Any {
@@ -227,7 +235,7 @@ mod the_backend {
                 PARTIAL_RENDERING_CACHE.with(|cache| {
                     crate::renderer::render_window_frame(
                         runtime_window,
-                        background,
+                        background.into(),
                         &mut **devices,
                         &mut cache.borrow_mut(),
                     )
@@ -249,6 +257,7 @@ mod the_backend {
 
         fn run_event_loop(&'static self, behavior: i_slint_core::backend::EventLoopQuitBehavior) {
             loop {
+                i_slint_core::timers::TimerList::maybe_activate_timers();
                 i_slint_core::animations::update_animations();
                 match self.with_inner(|inner| inner.event_queue.pop_front()) {
                     Some(McuEvent::Quit) => break,
@@ -352,7 +361,7 @@ pub mod native_widgets {}
 pub const HAS_NATIVE_STYLE: bool = false;
 
 #[cfg(feature = "simulator")]
-pub fn init_simulator() {
+pub fn init() {
     i_slint_core::backend::instance_or_init(|| alloc::boxed::Box::new(simulator::SimulatorBackend));
 }
 
@@ -363,8 +372,8 @@ pub fn init_with_display<Display: Devices + 'static>(display: Display) {
     });
 }
 
-#[cfg(not(feature = "pico-st7789"))]
-pub fn init_with_mock_display() {
+#[cfg(not(any(feature = "pico-st7789", feature = "simulator")))]
+pub fn init() {
     struct EmptyDisplay;
     impl embedded_graphics::draw_target::DrawTarget for EmptyDisplay {
         type Color = embedded_graphics::pixelcolor::Rgb888;
@@ -390,3 +399,6 @@ mod pico_st7789;
 
 #[cfg(feature = "pico-st7789")]
 pub use pico_st7789::*;
+
+#[cfg(not(feature = "pico-st7789"))]
+pub use i_slint_core_macros::identity as entry;

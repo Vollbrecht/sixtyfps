@@ -1,6 +1,8 @@
 // Copyright © SixtyFPS GmbH <info@slint-ui.com>
 // SPDX-License-Identifier: GPL-3.0-only OR LicenseRef-Slint-commercial
 
+// cSpell: ignore conv powf punct
+
 /*! module for the Rust code generator
 
 Some convention used in the generated code:
@@ -117,7 +119,7 @@ pub fn generate(doc: &Document) -> TokenStream {
     let sub_compos = llr
         .sub_components
         .iter()
-        .map(|sub_compo| generate_sub_component(sub_compo, &llr, None, quote!()))
+        .map(|sub_compo| generate_sub_component(sub_compo, &llr, None, quote!(), None))
         .collect::<Vec<_>>();
 
     let compo = generate_public_component(&llr);
@@ -243,7 +245,7 @@ fn generate_public_component(llr: &llr::PublicComponent) -> TokenStream {
     let global_container_id = format_ident!("Globals_{}", public_component_id);
 
     let component =
-        generate_item_tree(&llr.item_tree, llr, None, quote!(globals: #global_container_id));
+        generate_item_tree(&llr.item_tree, llr, None, quote!(globals: #global_container_id), None);
 
     let ctx = EvaluationContext {
         public_component: llr,
@@ -515,6 +517,7 @@ fn generate_sub_component(
     root: &llr::PublicComponent,
     parent_ctx: Option<ParentCtx>,
     extra_fields: TokenStream,
+    index_property: Option<llr::PropertyIndex>,
 ) -> TokenStream {
     let inner_component_id = inner_component_id(component);
 
@@ -527,7 +530,7 @@ fn generate_sub_component(
     let mut extra_components = component
         .popup_windows
         .iter()
-        .map(|c| generate_item_tree(c, root, Some(ParentCtx::new(&ctx, None)), quote!()))
+        .map(|c| generate_item_tree(c, root, Some(ParentCtx::new(&ctx, None)), quote!(), None))
         .collect::<Vec<_>>();
 
     let mut declared_property_vars = vec![];
@@ -592,6 +595,8 @@ fn generate_sub_component(
     let mut repeated_element_names: Vec<Ident> = vec![];
     let mut repeated_visit_branch: Vec<TokenStream> = vec![];
     let mut repeated_element_components: Vec<Ident> = vec![];
+    let mut repeated_subtree_ranges: Vec<TokenStream> = vec![];
+    let mut repeated_subtree_components: Vec<TokenStream> = vec![];
 
     for (idx, repeated) in component.repeated.iter().enumerate() {
         extra_components.push(generate_repeated_component(
@@ -643,6 +648,19 @@ fn generate_sub_component(
                 _self.#repeater_id.visit(order, visitor)
             }
         ));
+        repeated_subtree_ranges.push(quote!(
+            #idx => {
+                #ensure_updated
+                let (start, end) = _self.#repeater_id.range();
+                slint::re_exports::IndexRange { start, end }
+            }
+        ));
+        repeated_subtree_components.push(quote!(
+            #idx => {
+                #ensure_updated
+                *result = vtable::VRc::downgrade(&vtable::VRc::into_dyn(_self.#repeater_id.component_at(subtree_index).unwrap()))
+            }
+        ));
         repeated_element_names.push(repeater_id);
         repeated_element_components.push(rep_inner_component_id);
     }
@@ -685,6 +703,16 @@ fn generate_sub_component(
             repeated_visit_branch.push(quote!(
                 #repeater_offset..=#last_repeater => {
                     #sub_compo_field.apply_pin(_self).visit_dynamic_children(dyn_index - #repeater_offset, order, visitor)
+                }
+            ));
+            repeated_subtree_ranges.push(quote!(
+                #repeater_offset..=#last_repeater => {
+                    #sub_compo_field.apply_pin(_self).subtree_range(dyn_index - #repeater_offset)
+                }
+            ));
+            repeated_subtree_components.push(quote!(
+                #repeater_offset..=#last_repeater => {
+                    #sub_compo_field.apply_pin(_self).subtree_component(dyn_index - #repeater_offset, subtree_index, result)
                 }
             ));
         }
@@ -735,6 +763,16 @@ fn generate_sub_component(
     // FIXME! this is only public because of the ComponentHandle::Inner. we should find another way
     let visibility =
         core::ptr::eq(&root.item_tree.root as *const _, component as *const _).then(|| quote!(pub));
+
+    let subtree_index_function = if let Some(property_index) = index_property {
+        let prop = access_member(
+            &llr::PropertyReference::Local { sub_component_path: vec![], property_index },
+            &ctx,
+        );
+        quote!(#prop.get() as usize)
+    } else {
+        quote!(core::usize::MAX)
+    };
 
     quote!(
         #[derive(slint::re_exports::FieldOffsets, Default)]
@@ -795,6 +833,33 @@ fn generate_sub_component(
                     slint::re_exports::Orientation::Horizontal => #layout_info_h,
                     slint::re_exports::Orientation::Vertical => #layout_info_v,
                 }
+            }
+
+            fn subtree_range(self: ::core::pin::Pin<&Self>, dyn_index: usize) -> slint::re_exports::IndexRange {
+                #![allow(unused)]
+                use slint::re_exports::*;
+                let _self = self;
+                match dyn_index {
+                    #(#repeated_subtree_ranges)*
+                    _ => panic!("invalid dyn_index {}", dyn_index),
+                }
+            }
+
+            fn subtree_component(self: ::core::pin::Pin<&Self>, dyn_index: usize, subtree_index: usize, result: &mut slint::re_exports::ComponentWeak) {
+                #![allow(unused)]
+                use slint::re_exports::*;
+                let _self = self;
+                match dyn_index {
+                    #(#repeated_subtree_components)*
+                    _ => panic!("invalid dyn_index {}", dyn_index),
+                };
+            }
+
+            fn index_property(self: ::core::pin::Pin<&Self>) -> usize {
+                #![allow(unused)]
+                use slint::re_exports::*;
+                let _self = self;
+                #subtree_index_function
             }
         }
 
@@ -923,8 +988,15 @@ fn generate_item_tree(
     root: &llr::PublicComponent,
     parent_ctx: Option<ParentCtx>,
     extra_fields: TokenStream,
+    index_property: Option<llr::PropertyIndex>,
 ) -> TokenStream {
-    let sub_comp = generate_sub_component(&sub_tree.root, root, parent_ctx.clone(), extra_fields);
+    let sub_comp = generate_sub_component(
+        &sub_tree.root,
+        root,
+        parent_ctx.clone(),
+        extra_fields,
+        index_property,
+    );
     let inner_component_id = self::inner_component_id(&sub_tree.root);
     let parent_component_type = parent_ctx.iter().map(|parent| {
         let parent_component_id = self::inner_component_id(parent.ctx.current_sub_component.unwrap());
@@ -947,13 +1019,23 @@ fn generate_item_tree(
         (None, None)
     };
 
-    let parent_item_index = parent_ctx.and_then(|parent| {
-        parent
-            .repeater_index
-            .map(|idx| parent.ctx.current_sub_component.unwrap().repeated[idx].index_in_tree)
+    let parent_item_expression = parent_ctx.and_then(|parent| {
+        parent.repeater_index.map(|idx| {
+            let sub_component_offset = parent.ctx.current_sub_component.unwrap().repeated[idx].index_in_tree;
+
+            quote!(if let Some((parent_component, parent_index)) = self
+                .parent
+                .clone()
+                .upgrade()
+                .map(|sc| (VRcMapped::origin(&sc), sc.tree_index_of_first_child.get()))
+            {
+                *result = slint::re_exports::ItemRc::new(parent_component, parent_index as usize + #sub_component_offset - 1)
+                    .downgrade();
+            })
+        })
     });
-    let parent_item_index = parent_item_index.iter();
     let mut item_tree_array = vec![];
+    let mut item_array = vec![];
     sub_tree.tree.visit_in_array(&mut |node, children_offset, parent_index| {
         let parent_index = parent_index as u32;
         let (path, component) = follow_sub_component_path(&sub_tree.root, &node.sub_component_path);
@@ -984,18 +1066,21 @@ fn generate_item_tree(
 
             let children_count = node.children.len() as u32;
             let children_index = children_offset as u32;
+            let item_array_len = item_array.len() as u32;
             item_tree_array.push(quote!(
                 slint::re_exports::ItemTreeNode::Item{
-                    item: VOffset::new(#path #field #flick),
                     children_count: #children_count,
                     children_index: #children_index,
                     parent_index: #parent_index,
+                    item_array_index: #item_array_len,
                 }
-            ))
+            ));
+            item_array.push(quote!(VOffset::new(#path #field #flick)));
         }
     });
 
     let item_tree_array_len = item_tree_array.len();
+    let item_array_len = item_array.len();
 
     quote!(
         #sub_comp
@@ -1012,25 +1097,30 @@ fn generate_item_tree(
                 let self_rc = VRc::new(_self);
                 let _self = self_rc.as_pin_ref();
                 #init_window
-                slint::re_exports::init_component_items(_self, Self::item_tree(), #root_token.window.get().unwrap().window_handle());
+                slint::re_exports::init_component_items(_self, Self::item_array(), #root_token.window.get().unwrap().window_handle());
                 Self::init(slint::re_exports::VRc::map(self_rc.clone(), |x| x), #root_token, 0, 1);
                 self_rc
             }
 
-            fn item_tree() -> &'static [slint::re_exports::ItemTreeNode<Self>] {
+            fn item_tree() -> &'static [slint::re_exports::ItemTreeNode] {
+                const ITEM_TREE : [slint::re_exports::ItemTreeNode; #item_tree_array_len] = [#(#item_tree_array),*];
+                &ITEM_TREE
+            }
+
+            fn item_array() -> &'static [vtable::VOffset<Self, ItemVTable, vtable::AllowPin>] {
                 use slint::re_exports::*;
                 ComponentVTable_static!(static VT for #inner_component_id);
                 // FIXME: ideally this should be a const, but we can't because of the pointer to the vtable
-                static ITEM_TREE : slint::re_exports::OnceBox<
-                    [slint::re_exports::ItemTreeNode<#inner_component_id>; #item_tree_array_len]
+                static ITEM_ARRAY : slint::re_exports::OnceBox<
+                    [vtable::VOffset<#inner_component_id, ItemVTable, vtable::AllowPin>; #item_array_len]
                 > = slint::re_exports::OnceBox::new();
-                &*ITEM_TREE.get_or_init(|| Box::new([#(#item_tree_array),*]))
+                &*ITEM_ARRAY.get_or_init(|| Box::new([#(#item_array),*]))
             }
         }
 
         impl slint::re_exports::PinnedDrop for #inner_component_id {
             fn drop(self: core::pin::Pin<&mut #inner_component_id>) {
-                slint::re_exports::free_component_item_graphics_resources(self.as_ref(), Self::item_tree(), self.window.get().unwrap().window_handle());
+                slint::re_exports::free_component_item_graphics_resources(self.as_ref(), Self::item_array(), self.window.get().unwrap().window_handle());
             }
         }
 
@@ -1045,7 +1135,7 @@ fn generate_item_tree(
                 -> slint::re_exports::VisitChildrenResult
             {
                 use slint::re_exports::*;
-                return slint::re_exports::visit_item_tree(self, &VRcMapped::origin(&self.as_ref().self_weak.get().unwrap().upgrade().unwrap()), Self::item_tree(), index, order, visitor, visit_dynamic);
+                return slint::re_exports::visit_item_tree(self, &VRcMapped::origin(&self.as_ref().self_weak.get().unwrap().upgrade().unwrap()), self.get_item_tree().as_slice(), index, order, visitor, visit_dynamic);
                 #[allow(unused)]
                 fn visit_dynamic(_self: ::core::pin::Pin<&#inner_component_id>, order: slint::re_exports::TraversalOrder, visitor: ItemVisitorRefMut, dyn_index: usize) -> VisitChildrenResult  {
                     _self.visit_dynamic_children(dyn_index, order, visitor)
@@ -1053,23 +1143,45 @@ fn generate_item_tree(
             }
 
             fn get_item_ref(self: ::core::pin::Pin<&Self>, index: usize) -> ::core::pin::Pin<ItemRef> {
-                match &Self::item_tree()[index] {
-                    ItemTreeNode::Item { item, .. } => item.apply_pin(self),
+                match &self.get_item_tree().as_slice()[index] {
+                    ItemTreeNode::Item { item_array_index, .. } => {
+                        Self::item_array()[*item_array_index as usize].apply_pin(self)
+                    }
                     ItemTreeNode::DynamicTree { .. } => panic!("get_item_ref called on dynamic tree"),
 
                 }
             }
 
+            fn get_item_tree(
+                self: ::core::pin::Pin<&Self>) -> slint::re_exports::Slice<slint::re_exports::ItemTreeNode>
+            {
+                Self::item_tree().into()
+            }
+
+            fn get_subtree_range(
+                self: ::core::pin::Pin<&Self>, index: usize) -> slint::re_exports::IndexRange
+            {
+                self.subtree_range(index)
+            }
+
+            fn get_subtree_component(
+                self: ::core::pin::Pin<&Self>, index: usize, subtree_index: usize, result: &mut slint::re_exports::ComponentWeak)
+            {
+                self.subtree_component(index, subtree_index, result);
+            }
+
+            fn subtree_index(
+                self: ::core::pin::Pin<&Self>) -> usize
+            {
+                self.index_property()
+            }
+
             fn parent_item(self: ::core::pin::Pin<&Self>, index: usize, result: &mut slint::re_exports::ItemWeak) {
                 if index == 0 {
-                    #(
-                        if let Some(parent) = self.parent.clone().upgrade().map(|sc| VRcMapped::origin(&sc)) {
-                            *result = slint::re_exports::ItemRc::new(parent, #parent_item_index).parent_item();
-                        }
-                    )*
+                    #parent_item_expression
                     return;
                 }
-                let parent_index = Self::item_tree()[index].parent_index();
+                let parent_index = self.get_item_tree().as_slice()[index].parent_index();
                 let self_rc = slint::re_exports::VRcMapped::origin(&self.self_weak.get().unwrap().upgrade().unwrap());
                 *result = ItemRc::new(self_rc, parent_index).downgrade();
             }
@@ -1088,8 +1200,13 @@ fn generate_repeated_component(
     root: &llr::PublicComponent,
     parent_ctx: ParentCtx,
 ) -> TokenStream {
-    let component =
-        generate_item_tree(&repeated.sub_tree, root, Some(parent_ctx.clone()), quote!());
+    let component = generate_item_tree(
+        &repeated.sub_tree,
+        root,
+        Some(parent_ctx.clone()),
+        quote!(),
+        repeated.index_prop,
+    );
 
     let ctx = EvaluationContext {
         public_component: root,
@@ -1103,7 +1220,7 @@ fn generate_repeated_component(
     let inner_component_id = self::inner_component_id(&repeated.sub_tree.root);
 
     // let rep_inner_component_id = self::inner_component_id(&repeated.sub_tree.root.name);
-    //  let inner_component_id = self::inner_component_id(&parent_compo);
+    // let inner_component_id = self::inner_component_id(&parent_compo);
 
     let extra_fn = if let Some(listview) = &repeated.listview {
         let p_y = access_member(&listview.prop_y, &ctx);
@@ -1769,7 +1886,16 @@ fn compile_builtin_function_call(
             if let [Expression::NumberLiteral(popup_index), x, y, Expression::PropertyReference(parent_ref)] =
                 arguments
             {
-                let current_sub_component = ctx.current_sub_component.unwrap();
+                let mut parent_ctx = ctx;
+                let mut component_access_tokens = quote!(_self);
+                if let llr::PropertyReference::InParent { level, .. } = parent_ref {
+                    for _ in 0..level.get() {
+                        component_access_tokens =
+                            quote!(#component_access_tokens.parent.upgrade().unwrap().as_pin_ref());
+                        parent_ctx = parent_ctx.parent.as_ref().unwrap().ctx;
+                    }
+                }
+                let current_sub_component = parent_ctx.current_sub_component.unwrap();
                 let popup_window_id = inner_component_id(
                     &current_sub_component.popup_windows[*popup_index as usize].root,
                 );
@@ -1779,7 +1905,7 @@ fn compile_builtin_function_call(
                 let window_tokens = access_window_field(ctx);
                 quote!(
                     #window_tokens.show_popup(
-                        &VRc::into_dyn(#popup_window_id::new(_self.self_weak.get().unwrap().clone()).into()),
+                        &VRc::into_dyn(#popup_window_id::new(#component_access_tokens.self_weak.get().unwrap().clone()).into()),
                         Point::new(#x as f32, #y as f32),
                         #parent_component
                     );

@@ -25,11 +25,7 @@ pub fn embed_glyphs<'a>(
     scale_factor: f64,
     all_docs: impl Iterator<Item = &'a crate::object_tree::Document> + 'a,
     diag: &mut BuildDiagnostics,
-) -> bool {
-    if std::env::var("SLINT_EMBED_GLYPHS").is_err() {
-        return false;
-    }
-
+) {
     let mut fontdb = fontdb::Database::new();
     fontdb.load_system_fonts();
 
@@ -134,8 +130,6 @@ pub fn embed_glyphs<'a>(
         arguments: vec![Expression::NumberLiteral(resource_id as _, Unit::None)],
         source_location: None,
     });
-
-    true
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -149,12 +143,15 @@ fn embed_font(family_name: String, font: fontdue::Font, scale_factor: f64) -> Bi
                 })
                 .collect::<Vec<_>>()
         })
-        .expect("please specify SLINT_FONT_SIZES");
+        .expect("please specify SLINT_FONT_SIZES environment variable");
     pixel_sizes.sort();
 
     // TODO: configure coverage
-    let coverage =
-        ('a'..='z').chain('A'..='Z').chain('0'..='9').chain([' ', '.', '+', '-', '!', '%']);
+    let coverage = ('a'..='z')
+        .chain('A'..='Z')
+        .chain('0'..='9')
+        .chain(" !\"#$%&'()*+,-./:;<=>?@\\]^_|~".chars())
+        .chain(std::iter::once('…'));
 
     let mut character_map: Vec<CharacterMapEntry> = coverage
         .enumerate()

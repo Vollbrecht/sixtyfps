@@ -42,16 +42,21 @@ namespace slint {
 namespace private_api {
 using cbindgen_private::ComponentVTable;
 using cbindgen_private::ItemVTable;
+using ComponentRc = vtable::VRc<private_api::ComponentVTable>;
 using ComponentRef = vtable::VRef<private_api::ComponentVTable>;
+using IndexRange = cbindgen_private::IndexRange;
 using ItemRef = vtable::VRef<private_api::ItemVTable>;
 using ItemVisitorRefMut = vtable::VRefMut<cbindgen_private::ItemVisitorVTable>;
-using cbindgen_private::ComponentRc;
+using cbindgen_private::ComponentWeak;
 using cbindgen_private::ItemWeak;
 using cbindgen_private::TraversalOrder;
 }
 
 namespace private_api {
-using ItemTreeNode = cbindgen_private::ItemTreeNode<uint8_t>;
+using ItemTreeNode = cbindgen_private::ItemTreeNode;
+using ItemArrayEntry =
+        vtable::VOffset<uint8_t, slint::cbindgen_private::ItemVTable, vtable::AllowPin>;
+using ItemArray = slint::cbindgen_private::Slice<ItemArrayEntry>;
 using cbindgen_private::KeyboardModifiers;
 using cbindgen_private::KeyEvent;
 using cbindgen_private::PointerEvent;
@@ -107,10 +112,10 @@ public:
     float scale_factor() const { return slint_windowrc_get_scale_factor(&inner); }
     void set_scale_factor(float value) const { slint_windowrc_set_scale_factor(&inner, value); }
 
-    template<typename Component, typename ItemTree>
-    void free_graphics_resources(Component *c, ItemTree items) const
+    template<typename Component, typename ItemArray>
+    void free_graphics_resources(Component *c, ItemArray items) const
     {
-        cbindgen_private::slint_component_free_item_graphics_resources(
+        cbindgen_private::slint_component_free_item_array_graphics_resources(
                 vtable::VRef<ComponentVTable> { &Component::static_vtable, c }, items, &inner);
     }
 
@@ -120,8 +125,8 @@ public:
         cbindgen_private::slint_windowrc_set_focus_item(&inner, &item_rc);
     }
 
-    template<typename Component, typename ItemTree>
-    void init_items(Component *c, ItemTree items) const
+    template<typename Component, typename ItemArray>
+    void init_items(Component *c, ItemArray items) const
     {
         cbindgen_private::slint_component_init_items(
                 vtable::VRef<ComponentVTable> { &Component::static_vtable, c }, items, &inner);
@@ -159,19 +164,26 @@ public:
         }
     }
 
+    template<typename F>
+    void on_close_requested(F callback) const
+    {
+        auto actual_cb = [](void *data) { return (*reinterpret_cast<F *>(data))(); };
+        cbindgen_private::slint_windowrc_on_close_requested(
+                &inner, actual_cb, [](void *user_data) { delete reinterpret_cast<F *>(user_data); },
+                new F(std::move(callback)));
+    }
+
     void request_redraw() const { cbindgen_private::slint_windowrc_request_redraw(&inner); }
 
 private:
     cbindgen_private::WindowRcOpaque inner;
 };
 
-constexpr inline ItemTreeNode make_item_node(std::uintptr_t offset,
-                                             const cbindgen_private::ItemVTable *vtable,
-                                             uint32_t child_count, uint32_t child_index,
-                                             uint32_t parent_index)
+constexpr inline ItemTreeNode make_item_node(uint32_t child_count, uint32_t child_index,
+                                             uint32_t parent_index, uint32_t item_array_index)
 {
-    return ItemTreeNode { ItemTreeNode::Item_Body {
-            ItemTreeNode::Tag::Item, { vtable, offset }, child_count, child_index, parent_index } };
+    return ItemTreeNode { ItemTreeNode::Item_Body { ItemTreeNode::Tag::Item, child_count,
+                                                    child_index, parent_index, item_array_index } };
 }
 
 constexpr inline ItemTreeNode make_dyn_node(std::uintptr_t offset, std::uint32_t parent_index)
@@ -180,10 +192,12 @@ constexpr inline ItemTreeNode make_dyn_node(std::uintptr_t offset, std::uint32_t
                                                            parent_index } };
 }
 
-inline ItemRef get_item_ref(ComponentRef component, cbindgen_private::Slice<ItemTreeNode> item_tree,
-                            int index)
+inline ItemRef get_item_ref(ComponentRef component,
+                            const cbindgen_private::Slice<ItemTreeNode> item_tree,
+                            const private_api::ItemArray item_array, int index)
 {
-    const auto &item = item_tree.ptr[index].item.item;
+    const auto item_array_index = item_tree.ptr[index].item.item_array_index;
+    const auto item = item_array[item_array_index];
     return ItemRef { item.vtable, reinterpret_cast<char *>(component.instance) + item.offset };
 }
 
@@ -342,6 +356,18 @@ public:
     std::optional<SetRenderingNotifierError> set_rendering_notifier(F &&callback) const
     {
         return inner.set_rendering_notifier(std::forward<F>(callback));
+    }
+
+    /// This function allows registering a callback that's invoked when the user tries to close
+    /// a window.
+    /// The callback has to return a CloseRequestResponse.
+    template<typename F>
+    void on_close_requested(F &&callback) const
+    {
+        static_assert(std::is_invocable_v<F>, "Functor callback must be callable");
+        static_assert(std::is_same_v<std::invoke_result_t<F>, CloseRequestResponse>,
+                      "Functor callback must return CloseRequestResponse");
+        return inner.on_close_requested(std::forward<F>(callback));
     }
 
     /// This function issues a request to the windowing system to redraw the contents of the window.
@@ -822,6 +848,16 @@ public:
         return { &C::static_vtable, const_cast<C *>(&(**x.ptr)) };
     }
 
+    vtable::VWeak<private_api::ComponentVTable> component_at(int i) const
+    {
+        const auto &x = inner->data.at(i);
+        return vtable::VWeak<private_api::ComponentVTable>{x.ptr->into_dyn()};
+    }
+
+    private_api::IndexRange index_range() const {
+        return private_api::IndexRange { 0, inner->data.size() };
+    }
+
     float compute_layout_listview(const private_api::Property<float> *viewport_width,
                                   float listview_width) const
     {
@@ -958,7 +994,7 @@ void invoke_from_event_loop(Functor f)
 ///
 /// This function must be called from a different thread than the thread that runs the event loop
 /// otherwise it will result in a deadlock. Calling this function if the event loop is not running
-/// will also block foerver or until the event loop is started in another thread.
+/// will also block forever or until the event loop is started in another thread.
 ///
 /// The following example is reading the message property from a thread
 ///

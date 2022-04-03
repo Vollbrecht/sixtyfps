@@ -1,18 +1,32 @@
 // Copyright © SixtyFPS GmbH <info@slint-ui.com>
 // SPDX-License-Identifier: GPL-3.0-only OR LicenseRef-Slint-commercial
 
+// cSpell: ignore backtab
+
 #![warn(missing_docs)]
 //! Exposed Window API
 
+use crate::api::CloseRequestResponse;
 use crate::component::{ComponentRc, ComponentWeak};
-use crate::graphics::{Point, Size};
-use crate::input::{KeyEvent, MouseEvent, MouseInputState, TextCursorBlinker};
+use crate::graphics::{Point, Rect, Size};
+use crate::input::{
+    key_codes, KeyEvent, KeyEventType, MouseEvent, MouseInputState, TextCursorBlinker,
+};
 use crate::items::{ItemRc, ItemRef, ItemWeak, MouseCursor};
 use crate::properties::{Property, PropertyTracker};
+use crate::Callback;
 use alloc::boxed::Box;
 use alloc::rc::{Rc, Weak};
 use core::cell::{Cell, RefCell};
 use core::pin::Pin;
+
+fn next_focus_item(item: ItemRc) -> ItemRc {
+    item.next_focus_item()
+}
+
+fn previous_focus_item(item: ItemRc) -> ItemRc {
+    item.previous_focus_item()
+}
 
 /// This trait represents the interface that the generated code and the run-time
 /// require in order to implement functionality such as device-independent pixels,
@@ -78,12 +92,19 @@ pub trait PlatformWindow {
     ) -> usize;
 
     /// That's the opposite of [`Self::text_input_byte_offset_for_position`]
-    /// It takes a (UTF-8) byte offset in the text property, and returns its position
-    fn text_input_position_for_byte_offset(
+    /// It takes a (UTF-8) byte offset in the text property, and returns a Rectangle
+    /// left to the char. It is one logical pixel wide and ends at the baseline.
+    fn text_input_cursor_rect_for_byte_offset(
         &self,
         text_input: Pin<&crate::items::TextInput>,
         byte_offset: usize,
-    ) -> Point;
+    ) -> Rect;
+
+    /// This is called when the virtual keyboard should be shown because a widget that
+    /// uses input has the focus.
+    fn show_virtual_keyboard(&self, _: crate::items::InputType) {}
+    /// This is called when the widget that needed the keyboard loses focus
+    fn hide_virtual_keyboard(&self) {}
 
     /// Return self as any so the backend can upcast
     fn as_any(&self) -> &dyn core::any::Any;
@@ -152,6 +173,7 @@ pub struct Window {
     scale_factor: Pin<Box<Property<f32>>>,
     active: Pin<Box<Property<bool>>>,
     active_popup: RefCell<Option<PopupWindow>>,
+    close_requested: Callback<(), CloseRequestResponse>,
 }
 
 impl Drop for Window {
@@ -180,6 +202,7 @@ impl Window {
             scale_factor: Box::pin(Property::new_named(1., "i_slint_core::Window::scale_factor")),
             active: Box::pin(Property::new_named(false, "i_slint_core::Window::active")),
             active_popup: Default::default(),
+            close_requested: Default::default(),
         });
         let window_weak = Rc::downgrade(&window);
         window.platform_window.set(platform_window_fn(&window_weak)).ok().unwrap();
@@ -304,6 +327,15 @@ impl Window {
             }
             item = focus_item.parent_item();
         }
+
+        // Make Tab/Backtab handle keyboard focus
+        if event.text.starts_with(key_codes::Tab) && event.event_type == KeyEventType::KeyPressed {
+            self.focus_next_item();
+        } else if event.text.starts_with(key_codes::Backtab)
+            && event.event_type == KeyEventType::KeyPressed
+        {
+            self.focus_previous_item();
+        }
     }
 
     /// Installs a binding on the specified property that's toggled whenever the text cursor is supposed to be visible or not.
@@ -323,16 +355,8 @@ impl Window {
     /// Sets the focus to the item pointed to by item_ptr. This will remove the focus from any
     /// currently focused item.
     pub fn set_focus_item(self: Rc<Self>, focus_item: &ItemRc) {
-        if let Some(old_focus_item) = self.as_ref().focus_item.borrow().upgrade() {
-            old_focus_item
-                .borrow()
-                .as_ref()
-                .focus_event(&crate::input::FocusEvent::FocusOut, &self);
-        }
-
-        *self.as_ref().focus_item.borrow_mut() = focus_item.downgrade();
-
-        focus_item.borrow().as_ref().focus_event(&crate::input::FocusEvent::FocusIn, &self);
+        self.take_focus_item();
+        self.move_focus(focus_item.clone(), next_focus_item);
     }
 
     /// Sets the focus on the window to true or false, depending on the have_focus argument.
@@ -347,6 +371,75 @@ impl Window {
         if let Some(focus_item) = self.as_ref().focus_item.borrow().upgrade() {
             focus_item.borrow().as_ref().focus_event(&event, &self);
         }
+    }
+
+    /// Take the focus_item out of this Window
+    ///
+    /// This sends the FocusOut event!
+    fn take_focus_item(self: &Rc<Self>) -> Option<ItemRc> {
+        let focus_item = self.as_ref().focus_item.take();
+
+        if let Some(focus_item_rc) = focus_item.upgrade() {
+            focus_item_rc.borrow().as_ref().focus_event(&crate::input::FocusEvent::FocusOut, &self);
+            Some(focus_item_rc)
+        } else {
+            None
+        }
+    }
+
+    /// Publish the new focus_item to this Window and return the FocusEventResult
+    ///
+    /// This sends a FocusIn event!
+    fn publish_focus_item(self: Rc<Self>, item: &Option<ItemRc>) -> crate::input::FocusEventResult {
+        match item {
+            Some(item) => {
+                *self.as_ref().focus_item.borrow_mut() = item.downgrade();
+                item.borrow().as_ref().focus_event(&crate::input::FocusEvent::FocusIn, &self)
+            }
+            None => {
+                *self.as_ref().focus_item.borrow_mut() = Default::default();
+                crate::input::FocusEventResult::FocusAccepted // We were removing the focus, treat that as OK
+            }
+        }
+    }
+
+    fn move_focus(self: Rc<Self>, start_item: ItemRc, forward: impl Fn(ItemRc) -> ItemRc) {
+        let mut current_item = start_item;
+        let mut visited = alloc::vec::Vec::new();
+
+        loop {
+            if current_item.is_visible()
+                && self.clone().publish_focus_item(&Some(current_item.clone()))
+                    == crate::input::FocusEventResult::FocusAccepted
+            {
+                return; // Item was just published.
+            }
+            visited.push(current_item.clone());
+            current_item = forward(current_item);
+
+            if visited.iter().any(|i| *i == current_item) {
+                return; // Nothing to do: We took the focus_item already
+            }
+        }
+    }
+
+    /// Move keyboard focus to the next item
+    pub fn focus_next_item(self: Rc<Self>) {
+        let component = self.component();
+        let start_item = self
+            .take_focus_item()
+            .map(next_focus_item)
+            .unwrap_or_else(|| ItemRc::new(component, 0));
+        self.move_focus(start_item, next_focus_item);
+    }
+
+    /// Move keyboard focus to the previous item.
+    pub fn focus_previous_item(self: Rc<Self>) {
+        let component = self.component();
+        let start_item = previous_focus_item(
+            self.take_focus_item().unwrap_or_else(|| ItemRc::new(component, 0)),
+        );
+        self.move_focus(start_item, previous_focus_item);
     }
 
     /// Marks the window to be the active window. This typically coincides with the keyboard
@@ -550,6 +643,21 @@ impl Window {
             }
         }
     }
+
+    /// Sets the close_requested callback. The callback will be run when the user tries to close a window.
+    pub fn on_close_requested(&self, mut callback: impl FnMut() -> CloseRequestResponse + 'static) {
+        self.close_requested.set_handler(move |()| callback());
+    }
+
+    /// Runs the close_requested callback.
+    /// If the callback returns KeepWindowShown, this function returns false. That should prevent the Window from closing.
+    /// Otherwise it returns true, which allows the Window to hide.
+    pub fn request_close(&self) -> bool {
+        match self.close_requested.call(&()) {
+            CloseRequestResponse::HideWindow => true,
+            CloseRequestResponse::KeepWindowShown => false,
+        }
+    }
 }
 
 impl core::ops::Deref for Window {
@@ -581,7 +689,7 @@ pub mod ffi {
     use crate::api::{RenderingNotifier, RenderingState, SetRenderingNotifierError};
     use crate::slice::Slice;
 
-    /// This enum describes a low-level access to specific graphcis APIs used
+    /// This enum describes a low-level access to specific graphics APIs used
     /// by the renderer.
     #[repr(C)]
     pub enum GraphicsAPI {
@@ -744,6 +852,38 @@ pub mod ffi {
                 false
             }
         }
+    }
+
+    /// C binding to the on_close_requested() API of Window
+    #[no_mangle]
+    pub unsafe extern "C" fn slint_windowrc_on_close_requested(
+        handle: *const WindowRcOpaque,
+        callback: extern "C" fn(user_data: *mut c_void) -> CloseRequestResponse,
+        drop_user_data: extern "C" fn(user_data: *mut c_void),
+        user_data: *mut c_void,
+    ) {
+        struct WithUserData {
+            callback: extern "C" fn(user_data: *mut c_void) -> CloseRequestResponse,
+            drop_user_data: extern "C" fn(*mut c_void),
+            user_data: *mut c_void,
+        }
+
+        impl Drop for WithUserData {
+            fn drop(&mut self) {
+                (self.drop_user_data)(self.user_data)
+            }
+        }
+
+        impl WithUserData {
+            fn call(&self) -> CloseRequestResponse {
+                (self.callback)(self.user_data)
+            }
+        }
+
+        let with_user_data = WithUserData { callback, drop_user_data, user_data };
+
+        let window = &*(handle as *const WindowRc);
+        window.on_close_requested(move || with_user_data.call());
     }
 
     /// This function issues a request to the windowing system to redraw the contents of the window.

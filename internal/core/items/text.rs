@@ -8,11 +8,11 @@ When adding an item or a property, it needs to be kept in sync with different pl
 Lookup the [`crate::items`] module documentation.
 */
 
-use super::{Item, ItemConsts, ItemRc, PointArg, PointerEventButton, VoidArg};
+use super::{Item, ItemConsts, ItemRc, PointArg, PointerEventButton, RenderingResult, VoidArg};
 use crate::graphics::{Brush, Color, FontRequest, Rect};
 use crate::input::{
     key_codes, FocusEvent, FocusEventResult, InputEventFilterResult, InputEventResult, KeyEvent,
-    KeyEventResult, KeyEventType, KeyboardModifiers, MouseEvent,
+    KeyEventResult, KeyEventType, KeyboardModifiers, MouseEvent, StandardShortcut, TextShortcut,
 };
 use crate::item_rendering::{CachedRenderingData, ItemRenderer};
 use crate::layout::{LayoutInfo, Orientation};
@@ -195,8 +195,13 @@ impl Item for Text {
         FocusEventResult::FocusIgnored
     }
 
-    fn render(self: Pin<&Self>, backend: &mut &mut dyn ItemRenderer) {
-        (*backend).draw_text(self)
+    fn render(
+        self: Pin<&Self>,
+        backend: &mut &mut dyn ItemRenderer,
+        _self_rc: &ItemRc,
+    ) -> RenderingResult {
+        (*backend).draw_text(self);
+        RenderingResult::ContinueRenderingChildren
     }
 }
 
@@ -270,6 +275,9 @@ pub struct TextInput {
     pub pressed: core::cell::Cell<bool>,
     pub single_line: Property<bool>,
     pub cached_rendering_data: CachedRenderingData,
+    // The x position where the cursor wants to be.
+    // It is not updated when moving up and down even when the line is shorter.
+    preferred_x_pos: core::cell::Cell<f32>,
 }
 
 impl Item for TextInput {
@@ -346,7 +354,7 @@ impl Item for TextInput {
                 let clicked_offset = window.text_input_byte_offset_for_position(self, pos) as i32;
                 self.as_ref().pressed.set(true);
                 self.as_ref().anchor_position.set(clicked_offset);
-                self.set_cursor_position(clicked_offset, window);
+                self.set_cursor_position(clicked_offset, true, window);
                 if !self.has_focus() {
                     window.clone().set_focus_item(self_rc);
                 }
@@ -357,7 +365,7 @@ impl Item for TextInput {
                 if self.as_ref().pressed.get() {
                     let clicked_offset =
                         window.text_input_byte_offset_for_position(self, pos) as i32;
-                    self.set_cursor_position(clicked_offset, window);
+                    self.set_cursor_position(clicked_offset, true, window);
                 }
             }
             _ => return InputEventResult::EventIgnored,
@@ -372,22 +380,26 @@ impl Item for TextInput {
 
         match event.event_type {
             KeyEventType::KeyPressed => {
+                match event.text_shortcut() {
+                    Some(text_shortcut) => match text_shortcut {
+                        TextShortcut::Move(direction) => {
+                            TextInput::move_cursor(self, direction, event.modifiers.into(), window);
+                            return KeyEventResult::EventAccepted;
+                        }
+                        TextShortcut::DeleteForward => {
+                            TextInput::delete_char(self, window);
+                            return KeyEventResult::EventAccepted;
+                        }
+                        TextShortcut::DeleteBackward => {
+                            TextInput::delete_previous(self, window);
+                            return KeyEventResult::EventAccepted;
+                        }
+                    },
+                    None => (),
+                };
+
                 if let Some(keycode) = event.text.chars().next() {
-                    if let Ok(text_cursor_movement) = TextCursorDirection::try_from(keycode) {
-                        TextInput::move_cursor(
-                            self,
-                            text_cursor_movement,
-                            event.modifiers.into(),
-                            window,
-                        );
-                        return KeyEventResult::EventAccepted;
-                    } else if keycode == key_codes::Backspace {
-                        TextInput::delete_previous(self, window);
-                        return KeyEventResult::EventAccepted;
-                    } else if keycode == key_codes::Delete {
-                        TextInput::delete_char(self, window);
-                        return KeyEventResult::EventAccepted;
-                    } else if keycode == key_codes::Return && self.single_line() {
+                    if keycode == key_codes::Return && self.single_line() {
                         Self::FIELD_OFFSETS.accepted.apply_pin(self).call(&());
                         return KeyEventResult::EventAccepted;
                     }
@@ -402,21 +414,30 @@ impl Item for TextInput {
                 {
                     return KeyEventResult::EventIgnored;
                 }
+                match event.shortcut() {
+                    Some(shortcut) => match shortcut {
+                        StandardShortcut::SelectAll => {
+                            self.select_all(window);
+                            return KeyEventResult::EventAccepted;
+                        }
+                        StandardShortcut::Copy => {
+                            self.copy();
+                            return KeyEventResult::EventAccepted;
+                        }
+                        StandardShortcut::Paste => {
+                            self.paste(window);
+                            return KeyEventResult::EventAccepted;
+                        }
+                        StandardShortcut::Cut => {
+                            self.copy();
+                            self.delete_selection(window);
+                            return KeyEventResult::EventAccepted;
+                        }
+                        _ => (),
+                    },
+                    None => (),
+                }
                 if event.modifiers.control {
-                    if event.text == "a" {
-                        self.select_all(window);
-                        return KeyEventResult::EventAccepted;
-                    } else if event.text == "c" {
-                        self.copy();
-                        return KeyEventResult::EventAccepted;
-                    } else if event.text == "v" {
-                        self.paste(window);
-                        return KeyEventResult::EventAccepted;
-                    } else if event.text == "x" {
-                        self.copy();
-                        self.delete_selection(window);
-                        return KeyEventResult::EventAccepted;
-                    }
                     return KeyEventResult::EventIgnored;
                 }
                 self.delete_selection(window);
@@ -430,7 +451,7 @@ impl Item for TextInput {
                 self.as_ref().text.set(text.into());
                 let new_cursor_pos = (insert_pos + event.text.len()) as i32;
                 self.as_ref().anchor_position.set(new_cursor_pos);
-                self.set_cursor_position(new_cursor_pos, window);
+                self.set_cursor_position(new_cursor_pos, true, window);
 
                 // Keep the cursor visible when inserting text. Blinking should only occur when
                 // nothing is entered or the cursor isn't moved.
@@ -449,17 +470,24 @@ impl Item for TextInput {
             FocusEvent::FocusIn | FocusEvent::WindowReceivedFocus => {
                 self.has_focus.set(true);
                 self.show_cursor(window);
+                window.show_virtual_keyboard(self.input_type());
             }
             FocusEvent::FocusOut | FocusEvent::WindowLostFocus => {
                 self.has_focus.set(false);
                 self.hide_cursor();
+                window.hide_virtual_keyboard();
             }
         }
         FocusEventResult::FocusAccepted
     }
 
-    fn render(self: Pin<&Self>, backend: &mut &mut dyn ItemRenderer) {
+    fn render(
+        self: Pin<&Self>,
+        backend: &mut &mut dyn ItemRenderer,
+        _self_rc: &ItemRc,
+    ) -> RenderingResult {
         (*backend).draw_text_input(self);
+        RenderingResult::ContinueRenderingChildren
     }
 }
 
@@ -470,9 +498,13 @@ impl ItemConsts for TextInput {
     > = TextInput::FIELD_OFFSETS.cached_rendering_data.as_unpinned_projection();
 }
 
-enum TextCursorDirection {
+pub enum TextCursorDirection {
     Forward,
     Backward,
+    // ForwardByWord,
+    // BackwardByWord,
+    NextLine,
+    PreviousLine,
     PreviousCharacter, // breaks grapheme boundaries, so only used by delete-previous-char
     StartOfLine,
     EndOfLine,
@@ -487,6 +519,8 @@ impl core::convert::TryFrom<char> for TextCursorDirection {
         Ok(match value {
             key_codes::LeftArrow => Self::Backward,
             key_codes::RightArrow => Self::Forward,
+            key_codes::UpArrow => Self::PreviousLine,
+            key_codes::DownArrow => Self::NextLine,
             key_codes::Home => Self::StartOfLine,
             key_codes::End => Self::EndOfLine,
             _ => return Err(()),
@@ -534,12 +568,38 @@ impl TextInput {
         let mut grapheme_cursor =
             unicode_segmentation::GraphemeCursor::new(last_cursor_pos, text.len(), true);
 
+        let font_height = window.text_size(self.unresolved_font_request(), " ", None).height;
+
+        let mut reset_preferred_x_pos = true;
+
         let new_cursor_pos = match direction {
             TextCursorDirection::Forward => {
                 grapheme_cursor.next_boundary(&text, 0).ok().flatten().unwrap_or_else(|| text.len())
             }
             TextCursorDirection::Backward => {
                 grapheme_cursor.prev_boundary(&text, 0).ok().flatten().unwrap_or(0)
+            }
+            TextCursorDirection::NextLine => {
+                reset_preferred_x_pos = false;
+
+                let cursor_rect =
+                    window.text_input_cursor_rect_for_byte_offset(self, last_cursor_pos);
+                let mut cursor_xy_pos = cursor_rect.center();
+
+                cursor_xy_pos.y += font_height;
+                cursor_xy_pos.x = self.preferred_x_pos.get();
+                window.text_input_byte_offset_for_position(self, cursor_xy_pos)
+            }
+            TextCursorDirection::PreviousLine => {
+                reset_preferred_x_pos = false;
+
+                let cursor_rect =
+                    window.text_input_cursor_rect_for_byte_offset(self, last_cursor_pos);
+                let mut cursor_xy_pos = cursor_rect.center();
+
+                cursor_xy_pos.y -= font_height;
+                cursor_xy_pos.x = self.preferred_x_pos.get();
+                window.text_input_byte_offset_for_position(self, cursor_xy_pos)
             }
             TextCursorDirection::PreviousCharacter => {
                 let mut i = last_cursor_pos;
@@ -563,7 +623,7 @@ impl TextInput {
                 self.as_ref().anchor_position.set(new_cursor_pos as i32);
             }
         }
-        self.set_cursor_position(new_cursor_pos as i32, window);
+        self.set_cursor_position(new_cursor_pos as i32, reset_preferred_x_pos, window);
 
         // Keep the cursor visible when moving. Blinking should only occur when
         // nothing is entered or the cursor isn't moved.
@@ -572,10 +632,19 @@ impl TextInput {
         new_cursor_pos != last_cursor_pos
     }
 
-    fn set_cursor_position(self: Pin<&Self>, new_position: i32, window: &WindowRc) {
+    fn set_cursor_position(
+        self: Pin<&Self>,
+        new_position: i32,
+        reset_preferred_x_pos: bool,
+        window: &WindowRc,
+    ) {
         self.cursor_position.set(new_position);
         if new_position >= 0 {
-            let pos = window.text_input_position_for_byte_offset(self, new_position as usize);
+            let pos =
+                window.text_input_cursor_rect_for_byte_offset(self, new_position as usize).origin;
+            if reset_preferred_x_pos {
+                self.preferred_x_pos.set(pos.x);
+            }
             Self::FIELD_OFFSETS.cursor_position_changed.apply_pin(self).call(&(pos,));
         }
     }
@@ -612,7 +681,7 @@ impl TextInput {
         let text = [text.split_at(anchor).0, text.split_at(cursor).1].concat();
         self.text.set(text.into());
         self.anchor_position.set(anchor as i32);
-        self.set_cursor_position(anchor as i32, window);
+        self.set_cursor_position(anchor as i32, true, window);
         Self::FIELD_OFFSETS.edited.apply_pin(self).call(&());
     }
 
@@ -653,7 +722,7 @@ impl TextInput {
         let cursor_pos = cursor_pos + text_to_insert.len();
         self.text.set(text.into());
         self.anchor_position.set(cursor_pos as i32);
-        self.set_cursor_position(cursor_pos as i32, window);
+        self.set_cursor_position(cursor_pos as i32, true, window);
         Self::FIELD_OFFSETS.edited.apply_pin(self).call(&());
     }
 

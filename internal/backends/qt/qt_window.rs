@@ -5,15 +5,17 @@
 
 use cpp::*;
 use euclid::approxeq::ApproxEq;
+use i_slint_core::graphics::rendering_metrics_collector::{
+    RenderingMetrics, RenderingMetricsCollector,
+};
 use i_slint_core::graphics::{
-    Brush, Color, FPSCounter, FontRequest, Image, Point, Rect, RenderingCache, SharedImageBuffer,
-    Size,
+    Brush, Color, FontRequest, Image, Point, Rect, RenderingCache, SharedImageBuffer, Size,
 };
 use i_slint_core::input::{KeyEvent, KeyEventType, MouseEvent};
 use i_slint_core::item_rendering::{CachedRenderingData, ItemRenderer};
 use i_slint_core::items::{
-    self, FillRule, ImageRendering, InputType, ItemRef, MouseCursor, PointerEventButton,
-    TextOverflow, TextWrap,
+    self, FillRule, ImageRendering, InputType, ItemRc, ItemRef, Layer, MouseCursor, Opacity,
+    PointerEventButton, RenderingResult, TextOverflow, TextWrap,
 };
 use i_slint_core::layout::Orientation;
 use i_slint_core::window::{PlatformWindow, PopupWindow, PopupWindowLocation, WindowRc};
@@ -179,6 +181,20 @@ cpp! {{
                  });
             }
             QWidget::changeEvent(event);
+        }
+
+        void closeEvent(QCloseEvent *event) override {
+            bool accepted = rust!(Slint_requestClose [rust_window: &QtWindow as "void*"] -> bool as "bool" {
+                if let Some(window) = rust_window.self_weak.upgrade() {
+                    return window.request_close();
+                }
+                true
+            });
+            if (accepted) {
+                event->accept();
+            } else {
+                event->ignore();
+            }
         }
 
         QSize sizeHint() const override {
@@ -372,6 +388,7 @@ struct QtItemRenderer<'a> {
     cache: QtRenderingCache,
     default_font_properties: FontRequest,
     window: WindowRc,
+    metrics: RenderingMetrics,
 }
 
 impl ItemRenderer for QtItemRenderer<'_> {
@@ -762,6 +779,25 @@ impl ItemRenderer for QtItemRenderer<'_> {
         }}
     }
 
+    fn visit_opacity(&mut self, opacity_item: Pin<&Opacity>, self_rc: &ItemRc) -> RenderingResult {
+        let opacity = opacity_item.opacity();
+        if Opacity::need_layer(self_rc, opacity) {
+            self.render_and_blend_layer(&opacity_item.cached_rendering_data, opacity, self_rc)
+        } else {
+            self.apply_opacity(opacity);
+            opacity_item.cached_rendering_data.release(&mut self.cache.borrow_mut());
+            RenderingResult::ContinueRenderingChildren
+        }
+    }
+
+    fn visit_layer(&mut self, layer_item: Pin<&Layer>, self_rc: &ItemRc) -> RenderingResult {
+        if layer_item.cache_rendering_hint() {
+            self.render_and_blend_layer(&layer_item.cached_rendering_data, 1.0, self_rc)
+        } else {
+            RenderingResult::ContinueRenderingChildren
+        }
+    }
+
     fn combine_clip(&mut self, rect: Rect, radius: f32, mut border_width: f32) {
         let mut clip_rect = qttypes::QRectF {
             x: rect.min_x() as _,
@@ -860,6 +896,10 @@ impl ItemRenderer for QtItemRenderer<'_> {
         cpp! { unsafe [painter as "QPainter*", opacity as "float"] {
             painter->setOpacity(painter->opacity() * opacity);
         }}
+    }
+
+    fn metrics(&self) -> RenderingMetrics {
+        self.metrics.clone()
     }
 }
 
@@ -1100,6 +1140,95 @@ impl QtItemRenderer<'_> {
             }
         }}
     }
+
+    fn render_layer(
+        &mut self,
+        item_cache: &CachedRenderingData,
+        item_rc: &ItemRc,
+        layer_size_fn: &dyn Fn() -> qttypes::QSize,
+    ) -> Option<qttypes::QPixmap> {
+        let cache_entry = item_cache.get_or_update(&self.cache.clone(), || {
+            let layer_size: qttypes::QSize = layer_size_fn();
+            let mut layer_image = qttypes::QImage::new(layer_size, qttypes::ImageFormat::ARGB32_Premultiplied);
+            layer_image.fill(qttypes::QColor::from_rgba_f(0., 0., 0., 0.));
+
+            *self.metrics.layers_created.as_mut().unwrap() += 1;
+
+            let mut layer_painter = {
+                let img_ref: &mut qttypes::QImage = &mut layer_image;
+                cpp!(unsafe [img_ref as "QImage*"] -> QPainter as "QPainter" { return QPainter(img_ref); })
+            };
+
+            std::mem::swap(self.painter, &mut layer_painter);
+
+            {
+                let painter: &mut QPainter = &mut *self.painter;
+                cpp! { unsafe [
+                        painter as "QPainter*",
+                        layer_size as "QSize"
+                    ] {
+                    painter->setClipRect(0, 0, layer_size.width(), layer_size.height());
+                }}
+            }
+
+            i_slint_core::item_rendering::render_item_children(
+                self,
+                &item_rc.component(),
+                item_rc.index() as isize,
+            );
+
+            std::mem::swap(self.painter, &mut layer_painter);
+            drop(layer_painter);
+
+            let img_ref = &mut layer_image;
+            QtRenderingCacheItem::Pixmap(cpp!(unsafe [img_ref as "QImage*"] -> qttypes::QPixmap as "QPixmap" { return QPixmap::fromImage(*img_ref); }))
+        });
+        match &cache_entry {
+            QtRenderingCacheItem::Pixmap(pixmap) => Some(pixmap.clone()),
+            _ => None,
+        }
+    }
+
+    fn render_and_blend_layer(
+        &mut self,
+        item_cache: &CachedRenderingData,
+        alpha_tint: f32,
+        self_rc: &ItemRc,
+    ) -> RenderingResult {
+        let current_clip = self.get_current_clip();
+        if let Some(mut layer_image) = self.render_layer(&item_cache, self_rc, &|| {
+            // We don't need to include the size of the opacity item itself, since it has no content.
+            let children_rect = i_slint_core::properties::evaluate_no_tracking(|| {
+                let self_ref = self_rc.borrow();
+                self_ref.as_ref().geometry().union(
+                    &i_slint_core::item_rendering::item_children_bounding_rect(
+                        &self_rc.component(),
+                        self_rc.index() as isize,
+                        &current_clip,
+                    ),
+                )
+            });
+            qttypes::QSize {
+                width: children_rect.size.width as _,
+                height: children_rect.size.height as _,
+            }
+        }) {
+            self.save_state();
+            self.apply_opacity(alpha_tint);
+            {
+                let painter: &mut QPainter = &mut *self.painter;
+                let layer_image_ref: &mut qttypes::QPixmap = &mut layer_image;
+                cpp! { unsafe [
+                        painter as "QPainter*",
+                        layer_image_ref as "QPixmap*"
+                    ] {
+                    painter->drawPixmap(0, 0, *layer_image_ref);
+                }}
+            }
+            self.restore_state();
+        }
+        RenderingResult::ContinueRenderingWithoutChildren
+    }
 }
 
 cpp_class!(unsafe struct QWidgetPtr as "std::unique_ptr<QWidget>");
@@ -1108,7 +1237,7 @@ pub struct QtWindow {
     widget_ptr: QWidgetPtr,
     pub(crate) self_weak: Weak<i_slint_core::window::Window>,
 
-    fps_counter: Option<Rc<FPSCounter>>,
+    rendering_metrics_collector: Option<Rc<RenderingMetricsCollector>>,
 
     cache: QtRenderingCache,
 }
@@ -1122,7 +1251,7 @@ impl QtWindow {
         let rc = Rc::new(QtWindow {
             widget_ptr,
             self_weak: window_weak.clone(),
-            fps_counter: FPSCounter::new(),
+            rendering_metrics_collector: RenderingMetricsCollector::new(window_weak.clone()),
             cache: Default::default(),
         });
         let self_weak = Rc::downgrade(&rc);
@@ -1150,6 +1279,7 @@ impl QtWindow {
                 cache,
                 default_font_properties: self.default_font_properties(),
                 window: runtime_window,
+                metrics: RenderingMetrics { layers_created: Some(0) },
             };
 
             for (component, origin) in components {
@@ -1160,8 +1290,8 @@ impl QtWindow {
                 );
             }
 
-            if let Some(fps_counter) = &self.fps_counter {
-                fps_counter.measure_frame_rendered(&mut renderer);
+            if let Some(collector) = &self.rendering_metrics_collector {
+                collector.measure_frame_rendered(&mut renderer);
             }
 
             i_slint_core::animations::CURRENT_ANIMATION_DRIVER.with(|driver| {
@@ -1238,11 +1368,11 @@ impl PlatformWindow for QtWindow {
         cpp! {unsafe [widget_ptr as "QWidget*"] {
             widget_ptr->show();
         }};
-        if let Some(fps_counter) = &self.fps_counter {
+        if let Some(collector) = &self.rendering_metrics_collector {
             let qt_platform_name = cpp! {unsafe [] -> qttypes::QString as "QString" {
                 return QGuiApplication::platformName();
             }};
-            fps_counter.start(&format!("Qt backend (platform {})", qt_platform_name));
+            collector.start(&format!("Qt backend (platform {})", qt_platform_name));
         }
     }
 
@@ -1278,8 +1408,7 @@ impl PlatformWindow for QtWindow {
         };
         if size.width == 0 || size.height == 0 {
             let existing_size = cpp!(unsafe [widget_ptr as "QWidget*"] -> qttypes::QSize as "QSize" {
-                auto sizeHint = widget_ptr->sizeHint();
-                return sizeHint.isValid() ? sizeHint : widget_ptr->size();
+                return widget_ptr->size();
             });
             if size.width == 0 {
                 window_item.width.set(existing_size.width as _);
@@ -1486,11 +1615,11 @@ impl PlatformWindow for QtWindow {
         }}
     }
 
-    fn text_input_position_for_byte_offset(
+    fn text_input_cursor_rect_for_byte_offset(
         &self,
         text_input: Pin<&i_slint_core::items::TextInput>,
         byte_offset: usize,
-    ) -> Point {
+    ) -> Rect {
         let rect: qttypes::QRectF = get_geometry!(items::TextInput, text_input);
         let font: QFont =
             get_font(text_input.unresolved_font_request().merge(&self.default_font_properties()));
@@ -1523,7 +1652,13 @@ impl PlatformWindow for QtWindow {
                 return QPointF();
             return QPointF(textLine.x() + textLine.cursorToX(offset), textLine.y());
         }};
-        Point::new(r.x as _, r.y as _)
+
+        let font_size = cpp! { unsafe [font as "QFont"]
+                -> i32 as "int" {
+            return QFontInfo(font).pixelSize();
+        }};
+
+        Rect::new(Point::new(r.x as _, r.y as _), Size::new(1.0, font_size as f32))
     }
 
     fn as_any(&self) -> &dyn std::any::Any {

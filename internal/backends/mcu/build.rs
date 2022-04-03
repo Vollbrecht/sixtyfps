@@ -15,5 +15,7 @@ fn main() -> std::io::Result<()> {
         println!("cargo:BOARD_CONFIG_PATH={}", path.display())
     }
 
+    println!("cargo:EMBED_TEXTURES=1");
+
     Ok(())
 }

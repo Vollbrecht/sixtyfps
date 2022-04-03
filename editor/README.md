@@ -1,8 +1,17 @@
 # Editor Configuration for Slint
 
+This folder contains extensions or configuration files for different editor to better support .slint files.
+This README contains information on how to configure various editors. 
+
+If your favorite editor is not in this list, it just means we did not test it, not that it doesn't work. 
+We do provide a [language server for Slint](../tools/lsp) that should work with most editor that supports
+the Language Server Protocol (LSP)
+(see its [README.md](../tools/lsp/README.md) for more info on how to install it).
+If you do test your editor with it, we would be happy to accept a pull request that adds instructions here.
+
 ## Visual Studio Code
 
-For VSCode, we have an [extension in this repository](vscode_extension), you can install it
+For VSCode, we have an [extension in this repository](vscode), you can install it
 directly from the market place. This includes the Slint language server and is a one-stop shop to
 get you started.
 
@@ -67,10 +76,10 @@ To setup the lsp:
  3. Click *Add*
  4. As a name, use "Slint"
  5. use `*.slint` as a file pattern. (don't use MIME types)
- 6. As executable, select the `~/.cargo/bin/slint-lsp` binary (no arguments required)
+ 6. As executable, select the `slint-lsp` binary (no arguments required)
  7. Click *Apply* or *Ok*
 
-<img src="https://user-images.githubusercontent.com/959326/115923547-af5eeb00-a47e-11eb-8962-5a5f011892a7.png" width="50%" height="50%">
+<img src="https://user-images.githubusercontent.com/959326/157453134-c1ff17ed-6c44-4a48-802f-9a9b2a57e6ab.png" width="50%" height="50%">
 
 In order to **preview a component**, when you have a .slint file open, place your cursor to
 the name of the component you would like to preview and press *Alt + Enter* to open
@@ -121,7 +130,7 @@ exists under the `language` server section:
 
 Follow step 1. of the Vim section to get support for `.slint` files.
 
-The easist way to use the language server itself is in Neovim is via the `neovim/lsp-config`
+The easist way to use the language server itself in Neovim is via the `neovim/lsp-config`
 and `williamboman/nvim-lsp-installer` plugins. Once these are installed
 you can run `:LspInstallInfo` to install the `slint_lsp` binary (on Windows and Linux).
 
@@ -129,9 +138,8 @@ Once the slint_lsp language server is installed and running, you can triggger th
 via the code actions. Unfortunately there are several ways to trigger these, so please check your
 configuration.
 
-You might also find the `jrmoulton/tree-sitter-slint` tree-sitter parser for the Slint language
-interesting. Unfortunately this is not integrated into the tree-sitter support of Neovim at this
-time.
+Also, if you use `nvim-treesitter` you can install the Tree Sitter parser for Slint using `TSInstall slint`
+for syntax highlighting and indentation support.
 
 ## Sublime Text
 

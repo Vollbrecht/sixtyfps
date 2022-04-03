@@ -1,6 +1,8 @@
 // Copyright © SixtyFPS GmbH <info@slint-ui.com>
 // SPDX-License-Identifier: GPL-3.0-only OR LicenseRef-Slint-commercial
 
+// cSpell: ignore asyncness constness containee dealloc defaultness impls qself supertraits vref
+
 /*!
 Implementation detail for the vtable crate
 */
@@ -450,6 +452,7 @@ pub fn vtable(_attr: TokenStream, item: TokenStream) -> TokenStream {
             if ident == "drop_in_place" {
                 vtable_ctor.push(quote!(#ident: {
                     #sig_extern {
+                        #[allow(unused_unsafe)]
                         unsafe { ::core::ptr::drop_in_place((#self_call).0 as *mut T) };
                         ::core::alloc::Layout::new::<T>().into()
                     }
@@ -716,7 +719,7 @@ and implements HasStaticVTable for it.
             #generated_trait
             #generated_trait_assoc_const
 
-            /// Invariant, same as vtable::Inner: vtable and ptr has to be valid and ptr an instance macthcin the vtable
+            /// Invariant, same as vtable::Inner: vtable and ptr has to be valid and ptr an instance matching the vtable
             #[doc(hidden)]
             #[repr(C)]
             pub struct #to_name {

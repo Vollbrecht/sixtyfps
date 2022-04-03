@@ -8,10 +8,11 @@ use super::graphics::RenderingCache;
 use super::items::*;
 use crate::component::ComponentRc;
 use crate::graphics::{CachedGraphicsData, Point, Rect};
-use crate::item_tree::ItemVisitorResult;
+use crate::item_tree::{ItemVisitor, ItemVisitorResult, ItemVisitorVTable, VisitChildrenResult};
 use alloc::boxed::Box;
 use core::cell::{Cell, RefCell};
 use core::pin::Pin;
+use vtable::VRc;
 
 /// This structure must be present in items that are Rendered and contains information.
 /// Used by the backend.
@@ -95,6 +96,57 @@ pub(crate) fn is_clipping_item(item: Pin<ItemRef>) -> bool {
         || ItemRef::downcast_pin::<Clip>(item).is_some()
 }
 
+/// Return true if the item might be a clipping item and it has clipping enabled
+pub(crate) fn is_enabled_clipping_item(item: Pin<ItemRef>) -> bool {
+    //(FIXME: there should be some flag in the vtable instead of downcasting)
+    ItemRef::downcast_pin::<Flickable>(item).is_some()
+        || ItemRef::downcast_pin::<Clip>(item).map_or(false, |clip_item| clip_item.as_ref().clip())
+}
+
+/// Renders the children of the item with the specified index into the renderer.
+pub fn render_item_children(
+    renderer: &mut dyn ItemRenderer,
+    component: &ComponentRc,
+    index: isize,
+) {
+    let mut actual_visitor =
+        |component: &ComponentRc, index: usize, item: Pin<ItemRef>| -> VisitChildrenResult {
+            renderer.save_state();
+
+            let (do_draw, item_geometry) = renderer.filter_item(item);
+
+            let item_origin = item_geometry.origin;
+            renderer.translate(item_origin.x, item_origin.y);
+
+            // Don't render items that are clipped, with the exception of the Clip or Flickable since
+            // they themselves clip their content.
+            let render_result = if do_draw
+               || is_clipping_item(item)
+               // HACK, the geometry of the box shadow does not include the shadow, because when the shadow is the root for repeated elements it would translate the children
+               || ItemRef::downcast_pin::<BoxShadow>(item).is_some()
+            {
+                item.as_ref().render(
+                    &mut (renderer as &mut dyn ItemRenderer),
+                    &ItemRc::new(component.clone(), index),
+                )
+            } else {
+                RenderingResult::ContinueRenderingChildren
+            };
+
+            if matches!(render_result, RenderingResult::ContinueRenderingChildren) {
+                render_item_children(renderer, component, index as isize);
+            }
+            renderer.restore_state();
+            VisitChildrenResult::CONTINUE
+        };
+    vtable::new_vref!(let mut actual_visitor : VRefMut<ItemVisitorVTable> for ItemVisitor = &mut actual_visitor);
+    VRc::borrow_pin(component).as_ref().visit_children_item(
+        index,
+        crate::item_tree::TraversalOrder::BackToFront,
+        actual_visitor,
+    );
+}
+
 /// Renders the tree of items that component holds, using the specified renderer. Rendering is done
 /// relative to the specified origin.
 pub fn render_component_items(
@@ -105,41 +157,47 @@ pub fn render_component_items(
     renderer.save_state();
     renderer.translate(origin.x, origin.y);
 
-    let renderer = RefCell::new(renderer);
+    render_item_children(renderer, component, -1);
 
-    crate::item_tree::visit_items_with_post_visit(
-        component,
-        crate::item_tree::TraversalOrder::BackToFront,
-        |_, item, _, _| {
-            renderer.borrow_mut().save_state();
+    renderer.restore_state();
+}
 
-            let (do_draw, item_geometry) = renderer.borrow_mut().filter_item(item);
+/// Compute the bounding rect of all children. This does /not/ include item's own bounding rect. Remember to run this
+/// via `evaluate_no_tracking`.
+pub fn item_children_bounding_rect(
+    component: &ComponentRc,
+    index: isize,
+    clip_rect: &Rect,
+) -> Rect {
+    let mut bounding_rect = Rect::zero();
 
-            let item_origin = item_geometry.origin;
-            renderer.borrow_mut().translate(item_origin.x, item_origin.y);
+    let mut actual_visitor =
+        |component: &ComponentRc, index: usize, item: Pin<ItemRef>| -> VisitChildrenResult {
+            let item_geometry = item.as_ref().geometry();
 
-            // Don't render items that are clipped, with the exception of the Clip or Flickable since
-            // they themselves clip their content.
-            if !do_draw
-                && !is_clipping_item(item)
-                // HACK, the geometry of the box shadow does not include the shadow, because when the shadow is the root for repeated elements it would translate the children
-                && ItemRef::downcast_pin::<BoxShadow>(item).is_none()
-            {
-                return (ItemVisitorResult::Continue(()), ());
+            let local_clip_rect = clip_rect.translate(-item_geometry.origin.to_vector());
+
+            if let Some(clipped_item_geometry) = item_geometry.intersection(clip_rect) {
+                bounding_rect = bounding_rect.union(&clipped_item_geometry);
             }
-            item.as_ref().render(&mut (*renderer.borrow_mut() as &mut dyn ItemRenderer));
 
-            (ItemVisitorResult::Continue(()), ())
-        },
-        |_, _, _, r| {
-            renderer.borrow_mut().restore_state();
-            r
-        },
-        (),
+            if !is_enabled_clipping_item(item) {
+                bounding_rect = bounding_rect.union(&item_children_bounding_rect(
+                    component,
+                    index as isize,
+                    &local_clip_rect,
+                ));
+            }
+            VisitChildrenResult::CONTINUE
+        };
+    vtable::new_vref!(let mut actual_visitor : VRefMut<ItemVisitorVTable> for ItemVisitor = &mut actual_visitor);
+    VRc::borrow_pin(component).as_ref().visit_children_item(
+        index,
+        crate::item_tree::TraversalOrder::BackToFront,
+        actual_visitor,
     );
 
-    let renderer = renderer.into_inner();
-    renderer.restore_state();
+    bounding_rect
 }
 
 /// Trait used to render each items.
@@ -157,6 +215,30 @@ pub trait ItemRenderer {
     #[cfg(feature = "std")]
     fn draw_path(&mut self, path: Pin<&Path>);
     fn draw_box_shadow(&mut self, box_shadow: Pin<&BoxShadow>);
+    fn visit_opacity(&mut self, opacity_item: Pin<&Opacity>, _self_rc: &ItemRc) -> RenderingResult {
+        self.apply_opacity(opacity_item.opacity());
+        RenderingResult::ContinueRenderingChildren
+    }
+    fn visit_layer(&mut self, _layer_item: Pin<&Layer>, _self_rc: &ItemRc) -> RenderingResult {
+        // Not supported
+        RenderingResult::ContinueRenderingChildren
+    }
+
+    // Apply the bounds of the Clip element, if enabled. The default implementation calls
+    // combine_clip, but the render may choose an alternate way of implementing the clip.
+    // For example the GL backend uses a layered rendering approach.
+    fn visit_clip(&mut self, clip_item: Pin<&Clip>, _self_rc: &ItemRc) -> RenderingResult {
+        if clip_item.clip() {
+            let geometry = clip_item.geometry();
+            self.combine_clip(
+                euclid::rect(0., 0., geometry.width(), geometry.height()),
+                clip_item.border_radius(),
+                clip_item.border_width(),
+            )
+        }
+        RenderingResult::ContinueRenderingChildren
+    }
+
     /// Clip the further call until restore_state.
     /// radius/border_width can be used for border rectangle clip.
     /// (FIXME: consider removing radius/border_width and have another  function that take a path instead)
@@ -202,6 +284,13 @@ pub trait ItemRenderer {
 
     /// Return the internal renderer
     fn as_any(&mut self) -> &mut dyn core::any::Any;
+
+    /// Returns any rendering metrics collecting since the creation of the renderer (typically
+    /// per frame)
+    #[cfg(feature = "std")]
+    fn metrics(&self) -> crate::graphics::rendering_metrics_collector::RenderingMetrics {
+        Default::default()
+    }
 }
 
 /// The cache that needs to be held by the Window for the partial rendering

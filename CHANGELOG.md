@@ -1,17 +1,42 @@
 # Changelog
-All notable changes to this project will be documented in this file.
+All notable changes to this project are documented in this file.
 
 ## Unreleased
+
+### Changed
+ - On wasm, the input event are handled via a hidden `<input>` element, allowing the keyboard
+   to show on mobile platform
+ - The size of the window is kept when reloading a window in the preview (instead of being reset to the preferred size)
+
+### Added
+
+ - Added `From<&str>` and `From<SharedString>` to `StandardListViewItem` to make creation and modification of `StandardListView`'s models easier.
+ - Added `on_close_requested` function to `Window` to register callbacks that are emitted when the user tries to close a window.
+ - Added `VecModel::set_vec` to replace the entire contents with new data.
+ - Added a `cache-rendering-hint` boolean property that can be applied to any element, to hint to the renderer that it should cache the element and its children
+   into a cached layer. This may speed up rendering of complex sub-trees if they rarely change.
+
+### Fixed
+
+ - Fixed application of the `opacity` property evenly to child elements (#725).
+
+## [0.2.1] - 2022-03-10
 
 ### Added
 
  - C++ interpreter API: added a `Value::Value(int)` constructor
- - Globals Singleton may now refer to other global singletons
+ - Global singletons in `.slint` files may now refer to other global singletons
  - Added `input-type` property to `TextInput` and `LineEdit` that allows for characters to be replaced in password fields
+ - The `SpinBox` widget now handles up and down key events
 
 ### Fixed
 
- - `TouchArea::has-hover` is now properly set to false when the mouse leaves the window.
+ - `TouchArea::has-hover` is now properly set to false when the mouse leaves the window
+ - Fixed some cases of panics with 'Constant property being changed'
+ - Fixed `Flickable` animation
+ - Better compilation error when selecting unknown styles
+ - Fixed duplicated key event for some keys (such as tab) with the GL backend
+ - Improved property optimizations by inlining some bindings and remove more unused properties
 
 ## [0.2.0] - 2022-02-10
 
@@ -397,4 +422,5 @@ as well as the [Rust migration guide for the `sixtyfps` crate](api/rs/slint/migr
 [0.1.4]: https://github.com/slint-ui/slint/releases/tag/v0.1.4
 [0.1.5]: https://github.com/slint-ui/slint/releases/tag/v0.1.5
 [0.1.6]: https://github.com/slint-ui/slint/releases/tag/v0.1.6
-[0.2.0]: https://github.com/slint-ui/slint/releases/tag/v0.0.2
+[0.2.0]: https://github.com/slint-ui/slint/releases/tag/v0.2.0
+[0.2.1]: https://github.com/slint-ui/slint/releases/tag/v0.2.1

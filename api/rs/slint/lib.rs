@@ -1,6 +1,8 @@
 // Copyright © SixtyFPS GmbH <info@slint-ui.com>
 // SPDX-License-Identifier: GPL-3.0-only OR LicenseRef-Slint-commercial
 
+// cSpell: ignore buildrs
+
 /*!
 # Slint
 
@@ -68,11 +70,11 @@ build = "build.rs"
 edition = "2021"
 
 [dependencies]
-slint = "0.2.0"
+slint = "0.2.1"
 ...
 
 [build-dependencies]
-slint-build = "0.2.0"
+slint-build = "0.2.1"
 ```
 
 Use the API of the slint-build crate in the `build.rs` file:
@@ -283,7 +285,7 @@ pub mod re_exports {
     pub use i_slint_core::callbacks::Callback;
     pub use i_slint_core::component::{
         free_component_item_graphics_resources, init_component_items, Component, ComponentRefPin,
-        ComponentVTable,
+        ComponentVTable, ComponentWeak, IndexRange,
     };
     pub use i_slint_core::graphics::*;
     pub use i_slint_core::input::{
@@ -547,7 +549,7 @@ macro_rules! include_modules {
 /// Helper type that helps checking that the generated code is generated for the right version
 #[doc(hidden)]
 #[allow(non_camel_case_types)]
-pub struct VersionCheck_0_2_1;
+pub struct VersionCheck_0_2_2;
 
 #[cfg(doctest)]
 mod compile_fail_tests;

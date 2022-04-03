@@ -1,6 +1,8 @@
 // Copyright © SixtyFPS GmbH <info@slint-ui.com>
 // SPDX-License-Identifier: GPL-3.0-only OR LicenseRef-Slint-commercial
 
+// cSpell: ignore dealloc refcell unerase
+
 use crate::{api::Value, dynamic_type, eval};
 
 use core::convert::TryInto;
@@ -12,7 +14,9 @@ use i_slint_compiler::object_tree::ElementRc;
 use i_slint_compiler::*;
 use i_slint_compiler::{diagnostics::BuildDiagnostics, object_tree::PropertyDeclaration};
 use i_slint_core::api::Window;
-use i_slint_core::component::{Component, ComponentRef, ComponentRefPin, ComponentVTable};
+use i_slint_core::component::{
+    Component, ComponentRef, ComponentRefPin, ComponentVTable, ComponentWeak, IndexRange,
+};
 use i_slint_core::item_tree::{
     ItemTreeNode, ItemVisitorRefMut, ItemVisitorVTable, TraversalOrder, VisitChildrenResult,
 };
@@ -22,6 +26,7 @@ use i_slint_core::model::RepeatedComponent;
 use i_slint_core::model::Repeater;
 use i_slint_core::properties::InterpolatedPropertyValue;
 use i_slint_core::rtti::{self, AnimatedBindingKind, FieldOffset, PropertyInfo};
+use i_slint_core::slice::Slice;
 use i_slint_core::window::{WindowHandleAccess, WindowRc};
 use i_slint_core::{Brush, Color, Property, SharedString, SharedVector};
 use std::collections::BTreeMap;
@@ -62,9 +67,9 @@ impl<'id> Drop for ComponentBox<'id> {
     fn drop(&mut self) {
         let instance_ref = self.borrow_instance();
         if let Some(window) = eval::window_ref(instance_ref) {
-            i_slint_core::component::init_component_items(
+            i_slint_core::component::free_component_item_graphics_resources(
                 instance_ref.instance,
-                instance_ref.component_type.item_tree.as_slice(),
+                instance_ref.component_type.item_array.as_slice(),
                 window,
             );
         }
@@ -161,14 +166,37 @@ impl Component for ErasedComponentBox {
     fn layout_info(self: Pin<&Self>, orientation: Orientation) -> i_slint_core::layout::LayoutInfo {
         self.borrow().as_ref().layout_info(orientation)
     }
+
+    fn get_item_tree(self: Pin<&Self>) -> Slice<ItemTreeNode> {
+        get_item_tree(self.get_ref().borrow())
+    }
+
     fn get_item_ref(self: Pin<&Self>, index: usize) -> Pin<ItemRef> {
         // We're having difficulties transferring the lifetime to a pinned reference
         // to the other ComponentVTable with the same life time. So skip the vtable
         // indirection and call our implementation directly.
         unsafe { get_item_ref(self.get_ref().borrow(), index) }
     }
+
+    fn get_subtree_range(self: Pin<&Self>, index: usize) -> IndexRange {
+        self.borrow().as_ref().get_subtree_range(index)
+    }
+
+    fn get_subtree_component(
+        self: Pin<&Self>,
+        index: usize,
+        subindex: usize,
+        result: &mut ComponentWeak,
+    ) {
+        self.borrow().as_ref().get_subtree_component(index, subindex, result);
+    }
+
     fn parent_item(self: Pin<&Self>, index: usize, result: &mut ItemWeak) {
         self.borrow().as_ref().parent_item(index, result)
+    }
+
+    fn subtree_index(self: Pin<&Self>) -> usize {
+        self.borrow().as_ref().subtree_index()
     }
 }
 
@@ -260,7 +288,9 @@ pub struct ComponentDescription<'id> {
     pub(crate) ct: ComponentVTable,
     /// INVARIANT: both dynamic_type and item_tree have the same lifetime id. Here it is erased to 'static
     dynamic_type: Rc<dynamic_type::TypeInfo<'id>>,
-    item_tree: Vec<ItemTreeNode<crate::dynamic_type::Instance<'id>>>,
+    item_tree: Vec<ItemTreeNode>,
+    item_array:
+        Vec<vtable::VOffset<crate::dynamic_type::Instance<'id>, ItemVTable, vtable::AllowPin>>,
     pub(crate) items: HashMap<String, ItemWithinComponent>,
     pub(crate) custom_properties: HashMap<String, PropertiesWithinComponent>,
     pub(crate) custom_callbacks: HashMap<String, FieldOffset<Instance<'id>, Callback>>,
@@ -580,7 +610,7 @@ extern "C" fn visit_children_item(
     i_slint_core::item_tree::visit_item_tree(
         instance_ref.instance,
         &vtable::VRc::into_dyn(comp_rc),
-        instance_ref.component_type.item_tree.as_slice(),
+        get_item_tree(component).as_slice(),
         index,
         order,
         v,
@@ -734,6 +764,7 @@ pub(crate) fn generate_component<'id>(
                 rtti_for::<BoxShadow>(),
                 rtti_for::<Rotate>(),
                 rtti_for::<Opacity>(),
+                rtti_for::<Layer>(),
             ]
             .iter()
             .cloned(),
@@ -760,7 +791,9 @@ pub(crate) fn generate_component<'id>(
     }
 
     struct TreeBuilder<'id> {
-        tree_array: Vec<ItemTreeNode<Instance<'id>>>,
+        tree_array: Vec<ItemTreeNode>,
+        item_array:
+            Vec<vtable::VOffset<crate::dynamic_type::Instance<'id>, ItemVTable, vtable::AllowPin>>,
         items_types: HashMap<String, ItemWithinComponent>,
         type_builder: dynamic_type::TypeBuilder<'id>,
         repeater: Vec<ErasedRepeaterWithinComponent<'id>>,
@@ -817,11 +850,12 @@ pub(crate) fn generate_component<'id>(
                 self.type_builder.add_field(rt.type_info)
             };
             self.tree_array.push(ItemTreeNode::Item {
-                item: unsafe { vtable::VOffset::from_raw(rt.vtable, offset) },
                 children_index: child_offset,
                 children_count: item.children.len() as u32,
                 parent_index,
+                item_array_index: self.item_array.len() as u32,
             });
+            self.item_array.push(unsafe { vtable::VOffset::from_raw(rt.vtable, offset) });
             self.items_types.insert(
                 item.id.clone(),
                 ItemWithinComponent { offset, rtti: rt.clone(), elem: rc_item.clone() },
@@ -851,6 +885,7 @@ pub(crate) fn generate_component<'id>(
 
     let mut builder = TreeBuilder {
         tree_array: vec![],
+        item_array: vec![],
         items_types: HashMap::new(),
         type_builder: dynamic_type::TypeBuilder::new(guard),
         repeater: vec![],
@@ -1015,7 +1050,11 @@ pub(crate) fn generate_component<'id>(
         visit_children_item,
         layout_info,
         get_item_ref,
+        get_item_tree,
+        get_subtree_range,
+        get_subtree_component,
         parent_item,
+        subtree_index,
         drop_in_place,
         dealloc,
     };
@@ -1023,6 +1062,7 @@ pub(crate) fn generate_component<'id>(
         ct: t,
         dynamic_type: builder.type_builder.build(),
         item_tree: builder.tree_array,
+        item_array: builder.item_array,
         items: builder.items_types,
         custom_properties,
         custom_callbacks,
@@ -1131,7 +1171,7 @@ pub fn instantiate(
     if !component_type.original.is_global() {
         i_slint_core::component::init_component_items(
             instance_ref.instance,
-            instance_ref.component_type.item_tree.as_slice(),
+            instance_ref.component_type.item_array.as_slice(),
             eval::window_ref(instance_ref).unwrap(),
         );
     }
@@ -1488,13 +1528,62 @@ extern "C" fn layout_info(component: ComponentRefPin, orientation: Orientation) 
 }
 
 unsafe extern "C" fn get_item_ref(component: ComponentRefPin, index: usize) -> Pin<ItemRef> {
-    generativity::make_guard!(guard);
-    let instance_ref = InstanceRef::from_pin_ref(component, guard);
-    match &instance_ref.component_type.item_tree.as_slice()[index] {
-        ItemTreeNode::Item { item, .. } => core::mem::transmute::<Pin<ItemRef>, Pin<ItemRef>>(
-            item.apply_pin(instance_ref.instance),
-        ),
+    let tree = get_item_tree(component);
+    match &tree[index] {
+        ItemTreeNode::Item { item_array_index, .. } => {
+            generativity::make_guard!(guard);
+            let instance_ref = InstanceRef::from_pin_ref(component, guard);
+            core::mem::transmute::<Pin<ItemRef>, Pin<ItemRef>>(
+                instance_ref.component_type.item_array[*item_array_index as usize]
+                    .apply_pin(instance_ref.instance),
+            )
+        }
         ItemTreeNode::DynamicTree { .. } => panic!("get_item_ref called on dynamic tree"),
+    }
+}
+
+extern "C" fn get_subtree_range(component: ComponentRefPin, index: usize) -> IndexRange {
+    generativity::make_guard!(guard);
+    let instance_ref = unsafe { InstanceRef::from_pin_ref(component, guard) };
+    let rep_in_comp = unsafe { instance_ref.component_type.repeater[index].get_untagged() };
+    ensure_repeater_updated(instance_ref, rep_in_comp);
+
+    let repeater = rep_in_comp.offset.apply(&instance_ref.instance);
+    let (start, end) = repeater.range();
+    IndexRange { start, end }
+}
+
+extern "C" fn get_subtree_component(
+    component: ComponentRefPin,
+    index: usize,
+    subtree_index: usize,
+    result: &mut ComponentWeak,
+) {
+    generativity::make_guard!(guard);
+    let instance_ref = unsafe { InstanceRef::from_pin_ref(component, guard) };
+    let rep_in_comp = unsafe { instance_ref.component_type.repeater[index].get_untagged() };
+    ensure_repeater_updated(instance_ref, rep_in_comp);
+
+    let repeater = rep_in_comp.offset.apply(&instance_ref.instance);
+    *result = vtable::VRc::downgrade(&vtable::VRc::into_dyn(
+        repeater.component_at(subtree_index).unwrap(),
+    ))
+}
+
+extern "C" fn get_item_tree(component: ComponentRefPin) -> Slice<ItemTreeNode> {
+    generativity::make_guard!(guard);
+    let instance_ref = unsafe { InstanceRef::from_pin_ref(component, guard) };
+    let tree = instance_ref.component_type.item_tree.as_slice();
+    unsafe { core::mem::transmute::<&[ItemTreeNode], &[ItemTreeNode]>(tree) }.into()
+}
+
+extern "C" fn subtree_index(component: ComponentRefPin) -> usize {
+    generativity::make_guard!(guard);
+    let instance_ref = unsafe { InstanceRef::from_pin_ref(component, guard) };
+    if let Ok(value) = instance_ref.component_type.get_property(component, "index") {
+        value.try_into().unwrap()
+    } else {
+        core::usize::MAX
     }
 }
 
@@ -1522,17 +1611,14 @@ unsafe extern "C" fn parent_item(component: ComponentRefPin, index: usize, resul
                     .into_dyn()
                     .upgrade()
                     .unwrap();
-                *result = ItemRc::new(parent_rc, parent_index).parent_item();
+                *result = ItemRc::new(parent_rc, parent_index).downgrade();
             };
         }
         return;
     }
-    let parent_index = match &instance_ref.component_type.item_tree.as_slice()[index] {
-        ItemTreeNode::Item { parent_index, .. } => parent_index,
-        ItemTreeNode::DynamicTree { parent_index, .. } => parent_index,
-    };
+    let parent_index = get_item_tree(component)[index].parent_index();
     let self_rc = instance_ref.self_weak().get().unwrap().clone().into_dyn().upgrade().unwrap();
-    *result = ItemRc::new(self_rc, *parent_index as _).downgrade();
+    *result = ItemRc::new(self_rc, parent_index).downgrade();
 }
 
 unsafe extern "C" fn drop_in_place(component: vtable::VRefMut<ComponentVTable>) -> vtable::Layout {
